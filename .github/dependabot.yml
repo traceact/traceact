@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keep GitHub Actions versions current (checkout, setup-python,
+  # pypi-publish, cla-assistant). This is the useful one for you.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep Python dev dependencies current (pytest, pytest-asyncio).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
