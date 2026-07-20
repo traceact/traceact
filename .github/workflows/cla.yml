@@ -1,0 +1,46 @@
+name: CLA Assistant
+
+# Requires every contributor to sign the Contributor License Agreement (CLA.md)
+# before their pull request can be merged. Signatures are recorded in
+# signatures/version1/cla.json on the main branch.
+#
+# How a contributor signs: they comment on their pull request with the exact
+# sentence configured below. The bot records the signature and marks the PR
+# check green. On future PRs, an already-signed contributor is recognised
+# automatically.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          # Provided automatically by GitHub Actions.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A Personal Access Token with repo scope, stored as a repository
+          # secret named CLA_PAT. Needed so the bot can write the signature
+          # file to the repository.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_PAT }}
+        with:
+          path-to-signatures: 'signatures/version1/cla.json'
+          path-to-document: 'https://github.com/traceact/traceact/blob/main/CLA.md'
+          branch: 'main'
+          # Contributors listed here don't need to sign (project owner, bots).
+          allowlist: shehuphd,dependabot[bot]
+          custom-notsigned-prcomment: 'Thank you for your contribution. Before we can merge it, please read our [Contributor License Agreement](https://github.com/traceact/traceact/blob/main/CLA.md) and sign it by posting the following comment on this pull request:'
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          custom-allsigned-prcomment: 'All contributors have signed the CLA. Thank you.'

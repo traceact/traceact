@@ -1,0 +1,8 @@
+# Controls extra files included in the source distribution (sdist).
+# The wheel is unaffected — it only ever contains the traceact package plus
+# license metadata.
+#
+# USAGE.md is the full API reference. Bundling it here means the docs travel
+# with the source distribution and stay in sync with each release.
+
+include USAGE.md

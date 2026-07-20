@@ -1,22 +1,22 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceact"
-version = "0.1.0"
+version = "0.1.1"
 description = "X-ray vision for your code. Lightweight action-level tracing for Python."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Mo Shehu" }
+    { name = "Mohammed Shehu" }
 ]
 keywords = ["tracing", "observability", "debugging", "devtools", "ai-agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -38,8 +38,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://mohammedshehu.com"
+Homepage = "https://github.com/traceact/traceact"
 Repository = "https://github.com/traceact/traceact"
+Documentation = "https://github.com/traceact/traceact/blob/main/USAGE.md"
+Issues = "https://github.com/traceact/traceact/issues"
+Author = "https://mohammedshehu.com"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,10 +1,12 @@
 # TraceAct
 
-X-ray vision for your code.
+[![PyPI version](https://img.shields.io/pypi/v/traceact.svg)](https://pypi.org/project/traceact/)
+[![Python versions](https://img.shields.io/pypi/pyversions/traceact.svg)](https://pypi.org/project/traceact/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-TraceAct is a lightweight Python package for action-level tracing. It records the full story of what happens when a function runs — every step taken, every resource touched, every event recorded, and every failure encountered — so you can understand what actually happened without guessing.
+X-ray vision for Python code.
 
-Built for AI coding agents and human developers alike.
+TraceAct is a lightweight Python package for action-level tracing. It records the full story of what happens when a function runs, including every step taken, resource touched, event recorded, and failure encountered, so you or your agent can understand what actually happened.
 
 ## Install
 

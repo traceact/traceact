@@ -1,0 +1,40 @@
+name: Publish to PyPI
+
+# Publishes TraceAct to PyPI whenever a GitHub Release is published.
+# Uses PyPI Trusted Publishing (OIDC) — no API tokens or stored secrets.
+# The identity is proven by GitHub's OIDC token, which PyPI verifies against
+# the trusted publisher you configure on the PyPI project settings page.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    # The environment name must match the one you set on PyPI's trusted
+    # publisher configuration.
+    environment: pypi
+
+    permissions:
+      # Required for Trusted Publishing (OIDC). Without this the publish fails.
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distribution
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
