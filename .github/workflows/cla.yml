@@ -40,7 +40,7 @@ jobs:
           path-to-document: 'https://github.com/traceact/traceact/blob/main/CLA.md'
           branch: 'main'
           # Contributors listed here don't need to sign (project owner, bots).
-          allowlist: dependabot[bot]
+          allowlist: shehuphd, dependabot[bot]
           custom-notsigned-prcomment: 'Thank you for your contribution. Before we can merge it, please read our [Contributor License Agreement](https://github.com/traceact/traceact/blob/main/CLA.md) and sign it by posting the following comment on this pull request:'
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
           custom-allsigned-prcomment: 'All contributors have signed the CLA. Thank you.'
