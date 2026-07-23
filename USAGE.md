@@ -769,13 +769,16 @@ If your app has its own web UI, you can add a "traceact viewer" button that open
 
 Add a route that calls `launch_or_connect()`. It checks for a running viewer (via `~/.traceact/viewer.json` + health probe), adds your trace source to it, and returns the URL. If no viewer is running it spawns one as a background subprocess and waits up to 3 seconds for it to be ready.
 
-**FastAPI:**
+**FastAPI** (`launch_or_connect` does blocking I/O, so run it in a thread pool):
 ```python
+import asyncio
 from traceact.viewer.instance import launch_or_connect
 
 @router.get("/api/launch-viewer")
 async def launch_viewer():
-    url = launch_or_connect(source="data/traces/traces.jsonl")
+    loop = asyncio.get_event_loop()
+    url = await loop.run_in_executor(None, launch_or_connect,
+                                     "data/traces/traces.jsonl")
     return {"url": url}
 ```
 
