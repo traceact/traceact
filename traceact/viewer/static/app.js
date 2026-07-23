@@ -667,25 +667,102 @@ function saveSettings() {
 
 function wireModal() {
   document.getElementById("source-picker").addEventListener("click", openModal);
+
+  // Path-input fallback (inside <details>).
   document.getElementById("source-add").addEventListener("click", () => {
     addSource(document.getElementById("source-input").value);
   });
   document.getElementById("source-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addSource(e.target.value);
   });
+
+  // Native OS picker buttons.
+  document.getElementById("pick-file").addEventListener("click", () => pickSource("file"));
+  document.getElementById("pick-folder").addEventListener("click", () => pickSource("folder"));
+
+  // Drop zone.
+  const zone = document.getElementById("drop-zone");
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drag-over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    zone.classList.remove("drag-over");
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (!file.name.endsWith(".jsonl")) {
+      setDropStatus("Only .jsonl files are supported.", true);
+      return;
+    }
+    importDroppedFile(file);
+  });
+
+  // Close on backdrop click.
   document.getElementById("source-modal").addEventListener("click", (e) => {
     if (e.target.id === "source-modal") closeModal();
   });
 }
 
+/* Open the native OS file or folder picker via the server.  The server runs
+ * osascript (macOS) or tkinter so it can return the real filesystem path,
+ * which is what we need for live tailing. */
+async function pickSource(type) {
+  setDropStatus(type === "folder" ? "Opening folder picker…" : "Opening file picker…");
+  try {
+    const resp = await fetch(`/api/pick?type=${type}`);
+    const data = await resp.json();
+    if (data.cancelled || !data.path) {
+      setDropStatus("");
+      return;
+    }
+    setDropStatus("Adding source…");
+    await addSource(data.path);
+    setDropStatus("");
+  } catch (err) {
+    setDropStatus("Picker unavailable. Use the path input below.", true);
+  }
+}
+
+/* Accept a dragged-and-dropped .jsonl file.  The browser reads the contents
+ * and POSTs them to /api/import, which saves a copy to ~/.traceact/imports/
+ * and registers it as a source.  Because we copy the file rather than tail
+ * the original, this is a static snapshot — new writes to the original won't
+ * appear.  The UI labels it "(imported)". */
+async function importDroppedFile(file) {
+  setDropStatus(`Importing ${file.name}…`);
+  const content = await file.text();
+  try {
+    const resp = await fetch("/api/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, content, label: file.name.replace(".jsonl", "") }),
+    });
+    const data = await resp.json();
+    if (data.error) { setDropStatus(data.error, true); return; }
+    await refreshSources();
+    selectSource(data.name);
+    closeModal();
+    setDropStatus("");
+  } catch (err) {
+    setDropStatus("Import failed. Try the path input below.", true);
+  }
+}
+
+function setDropStatus(msg, isError = false) {
+  const el = document.getElementById("drop-status");
+  if (!el) return;
+  el.textContent = msg;
+  el.className = "drop-status" + (isError ? " error" : "");
+}
+
 function openModal() {
   renderSourceList();
+  setDropStatus("");
   document.getElementById("source-modal").hidden = false;
-  document.getElementById("source-input").focus();
 }
 function closeModal() {
   document.getElementById("source-modal").hidden = true;
   document.getElementById("source-input").value = "";
+  setDropStatus("");
 }
 
 function renderSourceList() {

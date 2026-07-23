@@ -155,13 +155,31 @@
   <!-- Add-source modal -->
   <div class="modal-backdrop" id="source-modal" hidden>
     <div class="modal">
-      <div class="modal-label">SOURCES</div>
+      <div class="modal-section-label">SOURCES</div>
       <div id="source-list"></div>
-      <div class="modal-label">ADD SOURCE</div>
-      <div class="add-row">
-        <input id="source-input" placeholder="local path or folder" />
-        <button class="btn btn-primary" id="source-add">Add</button>
+
+      <div class="modal-section-label">ADD SOURCE</div>
+
+      <!-- Drop zone: primary interaction (native OS picker + drag-drop) -->
+      <div class="drop-zone" id="drop-zone">
+        <div class="drop-icon">⊕</div>
+        <div class="drop-hint">Drag &amp; drop a <code>.jsonl</code> file here</div>
+        <div class="drop-or">or</div>
+        <div class="pick-row">
+          <button class="btn btn-primary" id="pick-file">Choose file</button>
+          <button class="btn" id="pick-folder">Choose folder</button>
+        </div>
+        <div class="drop-status" id="drop-status"></div>
       </div>
+
+      <!-- Path input: secondary / power-user option -->
+      <details class="path-details">
+        <summary>Or type a path</summary>
+        <div class="add-row">
+          <input id="source-input" placeholder="/path/to/traces.jsonl or folder/" />
+          <button class="btn btn-primary" id="source-add">Add</button>
+        </div>
+      </details>
     </div>
   </div>
 

@@ -25,11 +25,11 @@
 import argparse
 import sys
 import threading
-import time
 import webbrowser
 from typing import Optional
 
 from traceact.viewer.server import ViewerServer, ViewerState
+import traceact.viewer.instance as _instance
 
 _DEFAULT_PORT = 8765
 _DEFAULT_HOST = "127.0.0.1"
@@ -85,6 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true",
         help="Start the server without opening a browser tab.",
     )
+    view.add_argument(
+        "--new", action="store_true",
+        help="Force a new viewer instance even if one is already running.",
+    )
     view.set_defaults(handler=_run_view)
 
     return parser
@@ -92,11 +96,43 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_view(args: argparse.Namespace) -> int:
     """
-    Start the viewer server and (unless suppressed) open a browser tab.
-    """
-    state = ViewerState()
+    Start the viewer server (or reuse an existing one) and open a browser tab.
 
-    # Seed the source given on the command line, if any.
+    Single-instance behaviour: unless --new is passed or a specific --port was
+    requested, we first probe for an already-running viewer. If one is found we
+    add the requested source to it and open a browser tab on it — no second
+    server is started. This avoids accumulating zombie viewer processes across
+    repeated `traceact view` calls during a dev session.
+
+    When a NEW instance is still wanted:
+      - the user passed --new explicitly
+      - the user specified a --port (implies they want control of that port)
+      - no existing viewer is responding (stale state file)
+    """
+    user_chose_port = (args.port != _DEFAULT_PORT)
+
+    if not args.new and not user_chose_port:
+        existing = _instance.find_running()
+        if existing is not None:
+            host, port = existing["host"], existing["port"]
+            if args.source is not None:
+                added = _instance.add_source_to(host, port, args.source)
+                if added:
+                    print(f"Added source '{added['name']}' to running viewer.")
+                else:
+                    print(
+                        "Could not add source to the running viewer. "
+                        "The server may have restarted.",
+                        file=sys.stderr,
+                    )
+            url = f"http://{host}:{port}/"
+            print(f"Reusing existing viewer at {url}")
+            if not args.no_browser:
+                webbrowser.open(url)
+            return 0
+
+    # No existing viewer (or --new / explicit --port): start one.
+    state = ViewerState()
     if args.source is not None:
         name = state.add_source(args.source)
         print(f"Loaded source '{name}' → {state.sources[name]}")
@@ -105,7 +141,7 @@ def _run_view(args: argparse.Namespace) -> int:
     if server is None:
         print(
             f"Could not bind a port near {args.port}. "
-            "Try a different --port.",
+            "Try --new or a different --port.",
             file=sys.stderr,
         )
         return 1
@@ -114,8 +150,9 @@ def _run_view(args: argparse.Namespace) -> int:
     print(f"TraceAct viewer running at {url}")
     print("Press Ctrl+C to stop.")
 
+    _instance.write_state(args.host, port)
+
     if not args.no_browser:
-        # Open the browser shortly after the server starts accepting requests.
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
 
     try:
@@ -125,6 +162,7 @@ def _run_view(args: argparse.Namespace) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        _instance.clear_state()
     return 0
 
 

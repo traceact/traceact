@@ -6,8 +6,11 @@
 # What it serves:
 #   GET  /                        the single-page app (static/index.html)
 #   GET  /static/<file>           the app's CSS and JS
+#   GET  /api/health              {"status":"ok","version":"0.2.0","sources":N}
 #   GET  /api/sources             list configured sources (JSON)
 #   POST /api/sources             add a source by path (JSON body)
+#   GET  /api/pick?type=file|folder  open a native OS dialog; returns {"path":"..."}
+#   POST /api/import              save dropped-file content, add as snapshot source
 #   GET  /api/stream?source=&limit=   Server-Sent Events: snapshot then live tail
 #
 # Why SSE and not WebSockets:
@@ -31,12 +34,20 @@
 
 import json
 import os
+import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from traceact.viewer.reader import SourceReader
+
+# Directory where drag-dropped files are saved so they can be tailed.
+_IMPORTS_DIR = os.path.expanduser("~/.traceact/imports")
+
+# Only one native OS picker dialog may be open at once.
+_picker_lock = threading.Lock()
 
 # Directory holding index.html, styles.css, app.js (shipped inside the package).
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -114,8 +125,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html")
         elif route.startswith("/static/"):
             self._serve_static(route[len("/static/"):])
+        elif route == "/api/health":
+            self._serve_health()
         elif route == "/api/sources":
             self._serve_sources()
+        elif route == "/api/pick":
+            self._serve_pick(parse_qs(parsed.query))
         elif route == "/api/stream":
             self._serve_stream(parse_qs(parsed.query))
         else:
@@ -125,6 +140,8 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/sources":
             self._add_source()
+        elif parsed.path == "/api/import":
+            self._import_file()
         else:
             self._send_error(404, "Not found")
 
@@ -150,6 +167,64 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    # -- health ------------------------------------------------------------
+
+    def _serve_health(self) -> None:
+        self._send_json(200, {
+            "status": "ok",
+            "version": "0.2.0",
+            "sources": len(self.server.state.sources),  # type: ignore[attr-defined]
+        })
+
+    # -- native OS file/folder picker --------------------------------------
+
+    def _serve_pick(self, query: Dict[str, list]) -> None:
+        pick_type = _first(query.get("type")) or "file"
+        if not _picker_lock.acquire(blocking=False):
+            self._send_json(409, {"error": "A picker dialog is already open."})
+            return
+        try:
+            path = _open_native_picker(pick_type)
+        finally:
+            _picker_lock.release()
+        if path is None:
+            self._send_json(200, {"path": None, "cancelled": True})
+        else:
+            self._send_json(200, {"path": path, "cancelled": False})
+
+    # -- drag-drop import --------------------------------------------------
+
+    def _import_file(self) -> None:
+        body = self._read_json_body()
+        if body is None or "content" not in body or "name" not in body:
+            self._send_json(400, {"error": "expected {name, content}"})
+            return
+        # Sanitise the filename: strip any directory component, keep the stem.
+        raw_name = os.path.basename(body["name"]) or "import"
+        if not raw_name.endswith(".jsonl"):
+            raw_name += ".jsonl"
+        try:
+            os.makedirs(_IMPORTS_DIR, exist_ok=True)
+            dest = os.path.join(_IMPORTS_DIR, raw_name)
+            # Avoid clobbering an existing import with a numeric suffix.
+            if os.path.exists(dest):
+                stem = raw_name[:-6]  # strip .jsonl
+                i = 2
+                while os.path.exists(os.path.join(_IMPORTS_DIR, f"{stem}-{i}.jsonl")):
+                    i += 1
+                dest = os.path.join(_IMPORTS_DIR, f"{stem}-{i}.jsonl")
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(body["content"])
+        except OSError as exc:
+            self._send_json(500, {"error": str(exc)})
+            return
+        name = self.server.state.add_source(dest, body.get("label"))  # type: ignore[attr-defined]
+        self._send_json(200, {
+            "name": name,
+            "path": dest,
+            "imported": True,
+        })
 
     # -- sources API -------------------------------------------------------
 
@@ -260,6 +335,60 @@ class ViewerServer(ThreadingHTTPServer):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _open_native_picker(pick_type: str) -> Optional[str]:
+    """
+    Open a native OS file or folder picker and return the selected path, or
+    None if the user cancelled.
+
+    macOS: uses osascript (AppleScript), which ships with every Mac and needs no
+    extra dependencies.  Falls back to tkinter (stdlib) on other platforms.
+    """
+    import platform
+    if platform.system() == "Darwin":
+        return _pick_via_osascript(pick_type)
+    return _pick_via_tkinter(pick_type)
+
+
+def _pick_via_osascript(pick_type: str) -> Optional[str]:
+    if pick_type == "folder":
+        script = 'POSIX path of (choose folder with prompt "Select a folder of JSONL traces")'
+    else:
+        script = (
+            'POSIX path of (choose file of type {"jsonl", "public.plain-text"} '
+            'with prompt "Select a JSONL trace file")'
+        )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return None  # user cancelled
+        return result.stdout.strip().rstrip("/") or None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _pick_via_tkinter(pick_type: str) -> Optional[str]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        if pick_type == "folder":
+            path = filedialog.askdirectory(title="Select a folder of JSONL traces")
+        else:
+            path = filedialog.askopenfilename(
+                title="Select a JSONL trace file",
+                filetypes=[("JSONL files", "*.jsonl"), ("All files", "*.*")],
+            )
+        root.destroy()
+        return path or None
+    except Exception:
+        return None
+
 
 def _derive_name(path: str) -> str:
     """Human-friendly source name from a path: folder name, or file stem."""

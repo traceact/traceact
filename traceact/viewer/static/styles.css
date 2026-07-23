@@ -539,18 +539,22 @@ body {
   z-index: 20;
 }
 .modal {
-  width: 380px;
+  width: 420px;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 16px;
 }
-.modal-label {
+.modal-section-label {
   color: var(--text-faint);
   font-size: 10.5px;
   letter-spacing: 0.8px;
   margin: 4px 0 10px;
 }
+/* first label has no top margin */
+.modal-section-label:first-child { margin-top: 0; }
+.modal-section-label + * { margin-top: 0; }
+
 .source-option {
   padding: 9px 10px;
   border-radius: 6px;
@@ -559,6 +563,70 @@ body {
 .source-option:hover { background: var(--bg-hover); }
 .source-option .name { color: var(--text); }
 .source-option .path { color: var(--text-faint); font-size: 11px; }
+
+/* Drop zone */
+.drop-zone {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 22px 16px 18px;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+  margin-bottom: 4px;
+}
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(74, 222, 128, 0.06);
+}
+.drop-icon {
+  font-size: 24px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+  line-height: 1;
+}
+.drop-hint { color: var(--text-dim); font-size: 13px; }
+.drop-hint code { color: var(--accent); font-family: var(--mono); }
+.drop-or {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 12px 0;
+  position: relative;
+}
+.drop-or::before, .drop-or::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 35%;
+  height: 1px;
+  background: var(--border);
+}
+.drop-or::before { left: 0; }
+.drop-or::after  { right: 0; }
+.pick-row { display: flex; gap: 8px; justify-content: center; }
+.drop-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 10px;
+  min-height: 16px;
+}
+.drop-status.error { color: var(--status-failed); }
+
+/* Collapsible path input */
+.path-details {
+  margin-top: 12px;
+}
+.path-details summary {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.path-details summary::-webkit-details-marker { display: none; }
+.path-details summary::before { content: "▸"; font-size: 9px; transition: transform 0.15s; }
+.path-details[open] summary::before { transform: rotate(90deg); }
+.path-details summary:hover { color: var(--text-dim); }
 
 .add-row { display: flex; gap: 8px; margin-top: 8px; }
 .add-row input {
