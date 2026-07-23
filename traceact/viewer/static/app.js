@@ -771,7 +771,7 @@ function renderSourceList() {
   const list = document.getElementById("source-list");
   if (!list) return;
   if (state.sources.length === 0) {
-    list.innerHTML = `<div class="muted" style="padding:6px 10px">No sources yet.</div>`;
+    list.innerHTML = `<div class="muted" style="padding:6px 0">No sources yet.</div>`;
     return;
   }
   list.innerHTML = state.sources.map((s) => `
