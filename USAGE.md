@@ -1,6 +1,6 @@
 # TraceAct Usage Reference
 
-Full API documentation for TraceAct v0.1.0.
+Full API and CLI documentation for TraceAct.
 
 ## Contents
 
@@ -21,6 +21,7 @@ Full API documentation for TraceAct v0.1.0.
 15. [TraceConfig fields](#traceconfig-fields)
 16. [Test isolation](#test-isolation)
 17. [Trace record schema](#trace-record-schema)
+18. [Viewing traces](#viewing-traces)
 
 ---
 
@@ -486,6 +487,24 @@ def run_agent():
     ...
 ```
 
+### Production preset
+
+The package default records every trace (`sample_rate=1.0`), which is right for development and first-run — you trace a function, run it once, and the trace is there. For high-volume production, `TraceBudget.production()` opts into a lighter footprint:
+
+```python
+from traceact import configure, TraceBudget
+
+configure(budget=TraceBudget.production())
+# equivalent to TraceBudget(sample_rate=0.1, always_trace_errors=True)
+```
+
+It records roughly 10% of successful traces while never dropping a failure. Only `sample_rate` and `always_trace_errors` are set; every other field inherits from the package default or a parent trace. Override a single field on top of the preset if needed:
+
+```python
+budget = TraceBudget.production()
+budget.sample_rate = 0.25   # record 25% instead of 10%
+```
+
 ---
 
 ## TraceConfig fields
@@ -616,6 +635,57 @@ The full JSON object written to the JSONL sink:
 | `"cancelled"` | Explicitly stopped before finishing |
 
 **`budget_hit`** is a separate boolean field, not a status. A trace can be `"completed"` with `budget_hit: true`, meaning the function ran to completion but TraceAct stopped recording events partway through.
+
+---
+
+## Viewing traces
+
+TraceAct ships with a local, dependency-free web viewer. Installing the package gives you both the SDK and the `traceact` command — there is no separate viewer package to install.
+
+```bash
+pip install traceact
+traceact view data/traces/traces.jsonl
+```
+
+This opens a browser at `http://127.0.0.1:8765` showing a live trace log, a trace map, and an inspector. The viewer tails the source, so traces appear as your app writes them.
+
+### Command
+
+```bash
+traceact view [SOURCE]     # open the viewer
+traceact show [SOURCE]     # alias of view (identical)
+```
+
+`view` and `show` are interchangeable aliases of the same command.
+
+`SOURCE` is optional and may be:
+
+- a `.jsonl` file — `traceact view data/traces.jsonl`
+- a folder of `.jsonl` files — `traceact view data/traces/` (merges every file inside, e.g. per-process shards or several apps' files)
+- omitted — `traceact view` opens empty and prompts you to add a source
+
+The viewer reads any line that parses as JSON and looks like a trace; malformed entries are skipped, so files being appended to concurrently are safe to read.
+
+### Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--port N` | `8765` | Port to serve on. Auto-increments if the port is taken. |
+| `--host HOST` | `127.0.0.1` | Interface to bind. Localhost only by default. |
+| `--no-browser` | off | Start the server without opening a browser tab. |
+
+You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
+
+### What the viewer shows
+
+- **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, or touched target. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view.
+- **Trace inspector** — selecting a trace shows its id (plus parent and root trace ids when it is a child trace), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
+- **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. It plays as a step-through replay along the trace path, with a speed slider (1×–10×) and pause/play.
+
+### Notes
+
+- The viewer is a **local, single-node development tool**. It reads files on the machine it runs on. Exposing one machine's traces to another over the network (`traceact serve`) is planned for a later version.
+- The viewer server binds to localhost by default. Only pass `--host 0.0.0.0` if you understand that it exposes trace data (which can contain sensitive fields) to your network.
 
 ---
 

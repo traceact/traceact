@@ -1,0 +1,575 @@
+/* styles.css — TraceAct viewer
+ *
+ * The visual language from the TraceAct design system: a dark, monospace,
+ * terminal-adjacent look with a single accent colour. Everything is driven by
+ * CSS custom properties so the accent (green or white) and the row density
+ * (comfortable or compact) can be switched at runtime from the Settings page by
+ * toggling attributes on :root.
+ *
+ * No external fonts or assets — a system monospace stack keeps the viewer
+ * fully self-contained and offline. */
+
+:root {
+  /* Surfaces, darkest to lightest. */
+  --bg: #0a0c0d;
+  --bg-panel: #0f1214;
+  --bg-card: #14181b;
+  --bg-hover: #1a1f23;
+
+  /* Text. */
+  --text: #e6e8ea;
+  --text-dim: #8b949e;
+  --text-faint: #5a636c;
+
+  /* Lines. */
+  --border: #21262b;
+  --border-strong: #2d343a;
+
+  /* Accent (default green). Switched to white via [data-accent="white"]. */
+  --accent: #4ade80;
+  --accent-text: #0a0c0d;      /* text placed on top of the accent fill */
+  --accent-dim: #2b6b45;
+
+  /* Status colours. */
+  --status-completed: #4ade80;
+  --status-failed: #f87171;
+  --status-running: #eab308;
+  --status-cancelled: #6b7280;
+  --status-pending: #8b949e;
+
+  /* Kind badge colours. */
+  --kind-app: #60a5fa;
+  --kind-db: #c084fc;
+  --kind-http: #fb923c;
+  --kind-file: #34d399;
+  --kind-model: #f472b6;
+  --kind-job: #38bdf8;
+  --kind-log: #a3a3a3;
+  --kind-notify: #fbbf24;
+
+  /* Row rhythm — overridden by [data-density="compact"]. */
+  --row-pad-y: 11px;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --radius: 7px;
+}
+
+:root[data-accent="white"] {
+  --accent: #f5f6f7;
+  --accent-text: #0a0c0d;
+  --accent-dim: #6b7280;
+}
+
+:root[data-density="compact"] {
+  --row-pad-y: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- App shell: sidebar | main --------------------------------------- */
+
+#app {
+  display: grid;
+  grid-template-columns: 184px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  padding: 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+
+.brand .mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--accent-text);
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+
+.nav button {
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nav button:hover { background: var(--bg-hover); color: var(--text); }
+.nav button.active { background: var(--bg-card); color: var(--text); }
+
+/* ---- Main column ----------------------------------------------------- */
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.page-header {
+  padding: 22px 26px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.page-title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: 5px 0 16px;
+  color: var(--text-dim);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.source-picker {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.source-picker:hover { background: var(--bg-hover); color: var(--text); }
+
+.tabs { display: flex; gap: 22px; }
+
+.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  padding: 8px 0 12px;
+  cursor: pointer;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* content = canvas | inspector */
+.content {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 336px;
+  min-height: 0;
+}
+
+.canvas {
+  padding: 22px 26px;
+  overflow: auto;
+  min-width: 0;
+}
+
+.inspector {
+  border-left: 1px solid var(--border);
+  padding: 22px;
+  overflow: auto;
+}
+
+/* ---- Search ---------------------------------------------------------- */
+
+.search {
+  width: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  padding: 9px 12px;
+  margin-bottom: 18px;
+}
+.search::placeholder { color: var(--text-faint); }
+.search:focus { outline: none; border-color: var(--border-strong); }
+
+/* ---- Log table ------------------------------------------------------- */
+
+.log-table { width: 100%; border-collapse: collapse; }
+
+.log-table th {
+  text-align: left;
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 10.5px;
+  letter-spacing: 0.8px;
+  padding: 0 12px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-table td {
+  padding: var(--row-pad-y) 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.log-row { cursor: pointer; position: relative; }
+.log-row:hover td { background: var(--bg-hover); }
+
+/* Left accent bar via a box-shadow inset on the first cell. */
+.log-row.selected td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.log-row.failed td:first-child { box-shadow: inset 2px 0 0 var(--status-failed); }
+.log-row.selected.failed td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+.log-row td:first-child { color: var(--text-dim); }
+.col-action { color: var(--text); font-weight: 500; }
+.col-meta { color: var(--text-faint); font-size: 11px; }
+
+.empty-state {
+  color: var(--text-faint);
+  text-align: center;
+  padding: 60px 20px;
+}
+
+/* ---- Status + kind badges ------------------------------------------- */
+
+.status { font-size: 12px; }
+.status-completed { color: var(--status-completed); }
+.status-failed { color: var(--status-failed); }
+.status-running { color: var(--status-running); }
+.status-cancelled { color: var(--status-cancelled); }
+.status-pending { color: var(--status-pending); }
+
+.status-pill {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+}
+.badge-app { color: var(--kind-app); }
+.badge-db { color: var(--kind-db); }
+.badge-http { color: var(--kind-http); }
+.badge-file { color: var(--kind-file); }
+.badge-model { color: var(--kind-model); }
+.badge-job { color: var(--kind-job); }
+.badge-log { color: var(--kind-log); }
+.badge-notify { color: var(--kind-notify); }
+
+/* ---- Inspector ------------------------------------------------------- */
+
+.insp-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.insp-section-label {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.8px;
+  margin: 22px 0 10px;
+}
+
+.insp-summary {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  white-space: pre;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+
+.insp-actions { display: flex; gap: 10px; margin-top: 16px; }
+
+.btn {
+  font: inherit;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+}
+.btn:hover { background: var(--bg-hover); }
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+
+.insp-list { display: flex; flex-direction: column; gap: 10px; }
+
+.insp-step { display: flex; gap: 9px; align-items: baseline; }
+.insp-step .tick { color: var(--status-completed); }
+.insp-step .tick.pending { color: var(--status-running); }
+
+.insp-event .insp-event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.insp-event .insp-event-sub {
+  color: var(--text-faint);
+  font-size: 11px;
+  padding-left: 2px;
+}
+
+.touch-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.touch-chip {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.touch-chip .tk { color: var(--kind-app); margin-right: 6px; }
+
+.insp-error {
+  color: var(--status-failed);
+  font-size: 12px;
+}
+.muted { color: var(--text-faint); }
+
+/* ---- Trace map ------------------------------------------------------- */
+
+.map-wrap {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 22px 22px,
+    var(--bg-panel);
+  min-height: 420px;
+  overflow: auto;
+}
+
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.map-caption {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.8px;
+}
+
+.replay-controls { display: flex; align-items: center; gap: 10px; }
+
+.replay-btn {
+  font: inherit;
+  font-size: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+.replay-btn:hover { background: var(--bg-hover); }
+
+.speed-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.speed-caption {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+.speed-value {
+  color: var(--text);
+  font-size: 12px;
+  min-width: 30px;      /* stops the toolbar shifting as digits change */
+  text-align: right;
+}
+
+/* Range slider, themed for dark. Track + accent-coloured thumb. */
+.speed-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--border-strong);
+  cursor: pointer;
+}
+.speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+.speed-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+.speed-slider:focus { outline: none; }
+
+.map-col-label {
+  fill: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-family: var(--mono);
+}
+
+.map-node-box {
+  fill: var(--bg-card);
+  stroke: var(--border-strong);
+  rx: 8;
+}
+.map-node-title { fill: var(--text); font-size: 13px; font-family: var(--mono); }
+.map-node-kind { font-size: 11px; font-family: var(--mono); }
+
+/* Sequential replay: nodes and edges start dim ("pending") and light up in
+ * order as the replay steps through the trace. The .revealed class is added
+ * by the replay controller in app.js. */
+.map-node { opacity: 0.22; transition: opacity 0.3s ease; }
+.map-node.revealed { opacity: 1; }
+/* The node currently being stepped onto gets a brief accent ring. */
+.map-node.active .map-node-box { stroke: var(--accent); }
+
+.map-edge {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 6;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.map-edge.revealed { opacity: 0.85; animation: flow 0.9s linear infinite; }
+.map-edge.failed { stroke: var(--status-failed); }
+@keyframes flow { to { stroke-dashoffset: -22; } }
+
+.map-status { font-size: 12px; }
+
+/* ---- Settings -------------------------------------------------------- */
+
+.settings { padding: 26px; overflow: auto; max-width: 640px; }
+.settings h1 { font-size: 21px; margin: 0 0 4px; }
+.settings .sub { color: var(--text-dim); margin: 0 0 26px; font-size: 12px; }
+
+.setting { padding: 20px 0; border-top: 1px solid var(--border); }
+.setting h3 { margin: 0 0 4px; font-size: 13px; }
+.setting p { margin: 0 0 12px; color: var(--text-dim); font-size: 12px; }
+
+.choice-group { display: flex; gap: 10px; }
+.choice {
+  font: inherit;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.choice.active { border-color: var(--accent); }
+.choice .swatch { width: 11px; height: 11px; border-radius: 50%; }
+
+/* ---- Modal (add source) --------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: start center;
+  padding-top: 90px;
+  z-index: 20;
+}
+.modal {
+  width: 380px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 16px;
+}
+.modal-label {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.8px;
+  margin: 4px 0 10px;
+}
+.source-option {
+  padding: 9px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.source-option:hover { background: var(--bg-hover); }
+.source-option .name { color: var(--text); }
+.source-option .path { color: var(--text-faint); font-size: 11px; }
+
+.add-row { display: flex; gap: 8px; margin-top: 8px; }
+.add-row input {
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 8px 10px;
+}
+.add-row input:focus { outline: none; border-color: var(--border-strong); }
+
+[hidden] { display: none !important; }

@@ -84,6 +84,39 @@ class TraceBudget:
         self.sample_rate = sample_rate
         self.always_trace_errors = always_trace_errors
 
+    @classmethod
+    def production(cls) -> "TraceBudget":
+        """
+        A preset budget tuned for high-volume production use.
+
+        The package default records every trace (sample_rate=1.0), which is the
+        right behaviour for development and first-run: you trace a function, run
+        it once, and the trace is there. That default is deliberately NOT changed
+        globally, because a developer who wired TraceAct in and then found nothing
+        recorded would be justifiably confused.
+
+        In production, though, an app might run hundreds or thousands of traced
+        actions per second. Recording all of them can strain the sink and the
+        viewer. This preset opts into a lighter footprint:
+
+            sample_rate=0.1          record roughly 10% of successful traces
+            always_trace_errors=True never drop a failed trace, even when sampled
+
+        So you keep a representative sample of healthy traffic while still
+        capturing every failure — which is the part you most need when debugging.
+
+        Only sample_rate and always_trace_errors are set here. Every other field
+        is left as None so it inherits from the package default or a parent trace.
+
+        Usage:
+            configure(budget=TraceBudget.production())
+
+            # or override a single field on top of the preset:
+            budget = TraceBudget.production()
+            budget.sample_rate = 0.25   # record 25% instead of 10%
+        """
+        return cls(sample_rate=0.1, always_trace_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Package-level defaults

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<!--
+  index.html — TraceAct viewer single-page app.
+
+  The structure mirrors the design system: a left nav, a main column with a
+  header (title, source picker, tabs) and a body split into a canvas (log table
+  or trace map) and an inspector pane. Settings and the add-source modal are
+  overlaid views. All behaviour lives in app.js; all styling in styles.css.
+
+  The page ships inside the traceact package and is served by the stdlib
+  server, so it references only its own local assets — no CDNs, no fonts.
+-->
+<html lang="en" data-accent="green" data-density="comfortable">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TraceAct</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Left navigation -->
+    <aside class="sidebar">
+      <div class="brand"><span class="mark">✓</span> TraceAct</div>
+      <nav class="nav">
+        <button data-nav="traces" class="active">Traces</button>
+        <button data-nav="settings">Settings</button>
+      </nav>
+    </aside>
+
+    <!-- Traces view -->
+    <main class="main" id="traces-view">
+      <header class="page-header">
+        <h1 class="page-title">action.trace</h1>
+        <div class="subtitle">
+          <span id="source-name" class="muted">no source</span>
+          <span class="muted">·</span>
+          <button class="source-picker" id="source-picker">
+            <span id="source-path">select a source</span> ▾
+          </button>
+        </div>
+        <div class="tabs">
+          <button data-tab="log" class="active">Trace log</button>
+          <button data-tab="map">Trace map</button>
+        </div>
+      </header>
+
+      <section class="content">
+        <div class="canvas">
+          <!-- Log tab -->
+          <div id="view-log">
+            <input class="search" id="search" placeholder="Search traces" />
+            <table class="log-table">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>ACTION</th>
+                  <th>STATUS</th>
+                  <th>DUR.</th>
+                  <th>T·E·B</th>
+                </tr>
+              </thead>
+              <tbody id="log-body"></tbody>
+            </table>
+            <div id="log-empty" class="empty-state">
+              No traces yet. Add a source, then run your traced app.
+            </div>
+          </div>
+
+          <!-- Map tab -->
+          <div id="view-map" hidden>
+            <div class="map-toolbar">
+              <span class="map-caption" id="map-caption">SELECT A TRACE</span>
+              <div class="replay-controls">
+                <button class="replay-btn" id="replay-toggle">⏸ Pause</button>
+                <div class="speed-slider-wrap">
+                  <span class="speed-caption">Speed</span>
+                  <input type="range" min="1" max="10" step="1" value="1"
+                         class="speed-slider" id="speed-slider" />
+                  <span class="speed-value" id="speed-value">1×</span>
+                </div>
+              </div>
+            </div>
+            <div class="map-wrap" id="map-wrap"></div>
+          </div>
+        </div>
+
+        <!-- Inspector -->
+        <aside class="inspector" id="inspector">
+          <div class="muted">Select a trace to inspect it.</div>
+        </aside>
+      </section>
+    </main>
+
+    <!-- Settings view -->
+    <main class="settings" id="settings-view" hidden>
+      <h1>Settings</h1>
+      <p class="sub">Appearance and preferences</p>
+
+      <div class="setting">
+        <h3>Accent color</h3>
+        <p>Used for primary buttons, links, and active states across TraceAct.</p>
+        <div class="choice-group" data-setting="accent">
+          <button class="choice active" data-value="green">
+            <span class="swatch" style="background:#4ade80"></span> Green
+          </button>
+          <button class="choice" data-value="white">
+            <span class="swatch" style="background:#f5f6f7"></span> White
+          </button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <h3>Display density</h3>
+        <p>Row spacing in the trace log.</p>
+        <div class="choice-group" data-setting="density">
+          <button class="choice active" data-value="comfortable">Comfortable</button>
+          <button class="choice" data-value="compact">Compact</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <h3>Default trace view</h3>
+        <p>Which view opens first when you select an action.</p>
+        <div class="choice-group" data-setting="defaultView">
+          <button class="choice active" data-value="log">Trace log</button>
+          <button class="choice" data-value="map">Trace map</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <h3>Rows shown</h3>
+        <p>How many recent traces the log keeps in view.</p>
+        <div class="choice-group" data-setting="limit">
+          <button class="choice" data-value="25">25</button>
+          <button class="choice" data-value="50">50</button>
+          <button class="choice active" data-value="100">100</button>
+          <button class="choice" data-value="250">250</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <h3>Default trace map speed</h3>
+        <p>How fast the trace map replays when you open it. The slider in the map
+          view changes it on the fly; this sets the starting value.</p>
+        <div class="speed-slider-wrap">
+          <input type="range" min="1" max="10" step="1" value="1"
+                 class="speed-slider" id="settings-speed-slider" />
+          <span class="speed-value" id="settings-speed-value">1×</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add-source modal -->
+  <div class="modal-backdrop" id="source-modal" hidden>
+    <div class="modal">
+      <div class="modal-label">SOURCES</div>
+      <div id="source-list"></div>
+      <div class="modal-label">ADD SOURCE</div>
+      <div class="add-row">
+        <input id="source-input" placeholder="local path or folder" />
+        <button class="btn btn-primary" id="source-add">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

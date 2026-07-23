@@ -23,7 +23,9 @@
 import atexit
 import json
 import os
-from typing import Any, Dict, List
+import queue
+import threading
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,26 @@ class JsonlSink:
         # Ensure the parent directory exists so writes don't fail silently.
         parent = os.path.dirname(os.path.abspath(path))
         os.makedirs(parent, exist_ok=True)
+        # A per-sink lock that serialises appends from concurrent threads or
+        # async tasks within the SAME process.
+        #
+        # Why this is needed:
+        # When many traced actions finish at once (for example, an app running
+        # hundreds of concurrent async debates), they may all call write() at
+        # nearly the same moment. On POSIX, an append is only guaranteed atomic
+        # for writes under PIPE_BUF (typically 4KB). A rich trace record with
+        # events and payloads can exceed that, and two overlapping appends could
+        # then interleave and corrupt a line. Holding this lock around the write
+        # guarantees one complete line lands before the next begins.
+        #
+        # Scope and limits:
+        # This lock only coordinates writers inside one process. It does NOT
+        # coordinate separate processes writing to the same file — a threading
+        # lock is not shared across process boundaries. For multi-process
+        # concurrency, have each process write its own file (for example
+        # traces.<pid>.jsonl) and point the viewer at the containing folder,
+        # which merges them. See the async sink and the docs for more.
+        self._lock = threading.Lock()
 
     def write(self, record: Dict[str, Any]) -> None:
         """
@@ -134,9 +156,16 @@ class JsonlSink:
             record: A plain dict representing the finished trace. Must be
                     JSON-serialisable; non-serialisable values should have
                     been sanitised before reaching the sink.
+
+        The write is guarded by a per-sink lock so that concurrent threads or
+        async tasks in the same process cannot interleave partial lines. The
+        JSON is serialised once, then written as a single line, so the time
+        spent holding the lock is as short as possible.
         """
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+        line = json.dumps(record, default=str) + "\n"
+        with self._lock:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(line)
 
 
 # ---------------------------------------------------------------------------
@@ -175,3 +204,278 @@ class ConsoleSink:
             print(json.dumps(record, indent=2, default=str))
         else:
             print(json.dumps(record, default=str))
+
+
+# ---------------------------------------------------------------------------
+# AsyncSink
+# ---------------------------------------------------------------------------
+#
+# STATUS: Designed and implemented in the v0.2 line, scheduled to become an
+# activated, publicly-exported sink in v0.3 alongside the network (push) sinks.
+# It is intentionally NOT exported from traceact/__init__.py yet, and the
+# backpressure defaults below are provisional pending the v0.3 review. It is
+# written and commented in full now so the design is settled and the v0.3 work
+# is a matter of wiring and testing, not fresh design.
+#
+# Why an async sink exists:
+# Every other sink writes on the caller's thread. When a traced action finishes,
+# it calls sink.write(record), and the application waits for that write to
+# return before continuing. For a local file that is usually fast (the OS
+# buffers the write), but for a slow or flaky sink — most importantly a network
+# sink that posts traces to a remote collector — a blocking write would add the
+# sink's latency directly onto the application's hot path. Tracing must never
+# slow the code it observes, so this sink removes I/O from the caller entirely.
+#
+# How it works:
+# AsyncSink wraps one or more inner sinks. When the application calls write(),
+# the record is placed on an in-memory queue and write() returns immediately.
+# A single background worker thread drains the queue and forwards each record
+# to the inner sinks. The application's only cost is an enqueue; all real I/O
+# happens off the hot path.
+#
+#     app thread ──write(record)──▶ [ queue ] ──▶ worker thread ──▶ inner sinks
+#
+# The three hard problems an async sink must answer, and the choices made here:
+#
+#   1. Backpressure — what happens when the queue is full (the app is producing
+#      records faster than the worker can write them)? See the on_full policy.
+#   2. Shutdown — buffered records must reach the sinks before the process
+#      exits, or traces are silently lost. Handled via close() and an atexit
+#      hook that flushes and stops the worker.
+#   3. Fork safety — a background thread does not survive os.fork(). An app that
+#      forks worker processes would end up with a dead worker in each child.
+#      Handled with os.register_at_fork where available.
+
+# A private sentinel object used to tell the worker thread to stop. It is placed
+# on the queue by close(); when the worker pulls it, it drains anything left and
+# exits. Using a unique object (rather than None) means it can never be confused
+# with a real record.
+_SHUTDOWN = object()
+
+
+class AsyncSink:
+    """
+    A sink that performs all writes on a background thread, so the traced
+    application never blocks on sink I/O.
+
+    Wrap any other sink (or several) in an AsyncSink:
+
+        AsyncSink([JsonlSink("data/traces.jsonl")])
+        AsyncSink([JsonlSink(...), ConsoleSink()], max_queue=50000)
+
+    Args:
+        sinks:
+            The inner sinks to forward records to. Each must implement
+            write(record). The worker thread calls them one after another for
+            every record, in the order given.
+
+        max_queue:
+            The maximum number of records held in memory waiting to be written.
+            When this many records are already queued, the on_full policy
+            decides what happens to the next one. A larger queue absorbs bigger
+            bursts at the cost of more memory. Default: 10000.
+
+        on_full:
+            The backpressure policy when the queue is full. One of:
+
+                "drop_newest" (default):
+                    Discard the incoming record and count it as dropped. The
+                    application never blocks and never loses already-queued
+                    data. This honours the "tracing must not slow the app"
+                    principle; the cost is that some traces are lost under
+                    sustained overload. The dropped count is exposed via the
+                    dropped property so this loss is observable, not silent.
+
+                "drop_oldest":
+                    Discard the oldest queued record to make room for the new
+                    one. Favours recent data over old. Also never blocks.
+
+                "block":
+                    Block the calling thread until the worker frees space. This
+                    guarantees zero loss but reintroduces latency on the hot
+                    path, which is the very thing this sink exists to avoid. Use
+                    only when losing a trace is worse than a brief stall.
+
+    Notes:
+        - The worker is a daemon thread, so it will not keep the interpreter
+          alive on its own. Always rely on close() / atexit to flush cleanly.
+        - Inner-sink exceptions are swallowed (like all sink writes) so a
+          failing sink never crashes the worker or the application.
+    """
+
+    def __init__(
+        self,
+        sinks: List[Any],
+        max_queue: int = 10000,
+        on_full: str = "drop_newest",
+    ) -> None:
+        if on_full not in ("drop_newest", "drop_oldest", "block"):
+            raise ValueError(
+                "on_full must be 'drop_newest', 'drop_oldest', or 'block', "
+                f"got {on_full!r}"
+            )
+
+        self.sinks = sinks
+        self.max_queue = max_queue
+        self.on_full = on_full
+
+        # A bounded queue is the buffer between the app and the worker. Bounding
+        # it is what makes backpressure possible — an unbounded queue would grow
+        # without limit under overload and eventually exhaust memory.
+        self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue)
+
+        # Number of records dropped due to the on_full policy. Exposed so that
+        # loss under overload is visible rather than silent. Guarded by its own
+        # tiny lock because it is written by app threads and read by callers.
+        self._dropped = 0
+        self._dropped_lock = threading.Lock()
+
+        # The worker thread and a flag marking whether we have started it. We
+        # start lazily on the first write so that simply constructing an
+        # AsyncSink (for example in a config that is never used) costs nothing.
+        self._worker: Optional[threading.Thread] = None
+        self._started = False
+        self._start_lock = threading.Lock()
+
+        # Register a fork handler so that a child process created via os.fork()
+        # gets a fresh worker thread instead of inheriting a dead one. Not all
+        # platforms provide register_at_fork (Windows does not), so guard it.
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(after_in_child=self._reinit_after_fork)
+
+    # -- public API --------------------------------------------------------
+
+    @property
+    def dropped(self) -> int:
+        """The number of records dropped so far under the on_full policy."""
+        with self._dropped_lock:
+            return self._dropped
+
+    def write(self, record: Dict[str, Any]) -> None:
+        """
+        Enqueue a record for the worker thread to write. Returns immediately
+        (unless on_full="block" and the queue is full).
+
+        The worker is started on the first call, so an AsyncSink that is never
+        written to never spawns a thread.
+        """
+        self._ensure_started()
+
+        if self.on_full == "block":
+            # Block until there is space. This is the only policy that can stall
+            # the caller; it trades hot-path latency for zero loss.
+            self._queue.put(record)
+            return
+
+        try:
+            # Non-blocking enqueue. Raises queue.Full immediately if full.
+            self._queue.put_nowait(record)
+        except queue.Full:
+            if self.on_full == "drop_oldest":
+                # Make room by discarding the oldest queued record, then retry.
+                # Both operations are best-effort: under heavy contention the
+                # queue state can change between them, so we tolerate races
+                # rather than lock the whole queue.
+                try:
+                    self._queue.get_nowait()
+                    self._record_drop()
+                    self._queue.put_nowait(record)
+                    return
+                except (queue.Empty, queue.Full):
+                    self._record_drop()
+                    return
+            else:
+                # on_full == "drop_newest": discard the incoming record.
+                self._record_drop()
+
+    def flush(self) -> None:
+        """
+        Block until every record queued so far has been handed to the inner
+        sinks. Useful in tests and before a known shutdown point.
+
+        This does not stop the worker; more records can be written afterward.
+        """
+        if self._started:
+            self._queue.join()
+
+    def close(self) -> None:
+        """
+        Flush all remaining records and stop the worker thread.
+
+        Safe to call more than once. After close(), the sink should not be
+        written to again. Registered with atexit on first start so that
+        short-lived scripts flush automatically on exit.
+        """
+        if not self._started:
+            return
+        # Signal the worker to finish. It will drain any remaining real records
+        # before it sees the sentinel and exits.
+        self._queue.put(_SHUTDOWN)
+        if self._worker is not None:
+            self._worker.join()
+        self._started = False
+
+    # -- internals ---------------------------------------------------------
+
+    def _ensure_started(self) -> None:
+        """Start the worker thread once, on first write. Thread-safe."""
+        if self._started:
+            return
+        with self._start_lock:
+            if self._started:
+                return
+            self._worker = threading.Thread(
+                target=self._run,
+                name="traceact-async-sink",
+                daemon=True,
+            )
+            self._worker.start()
+            self._started = True
+            # Flush on interpreter exit so buffered records are not lost by a
+            # script that never calls close() itself.
+            atexit.register(self.close)
+
+    def _run(self) -> None:
+        """
+        The worker loop. Pulls records off the queue and forwards each to every
+        inner sink until it receives the shutdown sentinel.
+        """
+        while True:
+            item = self._queue.get()
+            try:
+                if item is _SHUTDOWN:
+                    # Stop looping. task_done in finally keeps join() correct.
+                    return
+                for sink in self.sinks:
+                    try:
+                        sink.write(item)
+                    except Exception:
+                        # A failing inner sink must never crash the worker or,
+                        # by extension, the application. Tracing is observability
+                        # tooling; it must not become a point of failure.
+                        pass
+            finally:
+                # Mark the item done so flush()'s queue.join() can return once
+                # the backlog is fully processed.
+                self._queue.task_done()
+
+    def _record_drop(self) -> None:
+        """Increment the dropped-record counter under its lock."""
+        with self._dropped_lock:
+            self._dropped += 1
+
+    def _reinit_after_fork(self) -> None:
+        """
+        Reset state in a freshly forked child process.
+
+        The parent's worker thread does not exist in the child (fork copies only
+        the calling thread), and the inherited queue may hold half-written state.
+        We start clean: a new empty queue and no worker. The next write() in the
+        child starts a fresh worker. Records that were queued in the parent at
+        fork time stay with the parent to be written there.
+        """
+        self._queue = queue.Queue(maxsize=self.max_queue)
+        self._worker = None
+        self._started = False
+        self._start_lock = threading.Lock()
+        self._dropped_lock = threading.Lock()
