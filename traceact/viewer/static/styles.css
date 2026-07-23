@@ -64,6 +64,9 @@
   --row-pad-y: 6px;
 }
 
+/* Text selection: semi-transparent accent so the highlighted text stays readable. */
+::selection { background: rgba(74, 222, 128, 0.25); color: var(--text); }
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -163,16 +166,24 @@ body {
   gap: 7px;
 }
 
+/* Default (source is active): looks like a quiet secondary link. */
 .source-picker {
   background: none;
-  border: none;
+  border: 1px solid transparent;
   color: var(--text-dim);
   font: inherit;
   cursor: pointer;
-  padding: 2px 4px;
+  padding: 2px 8px;
   border-radius: 4px;
 }
 .source-picker:hover { background: var(--bg-hover); color: var(--text); }
+
+/* No source selected: accent border + green text to draw the eye. */
+.source-picker.empty {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+.source-picker.empty:hover { border-color: var(--accent); background: rgba(74, 222, 128, 0.08); }
 
 .tabs { display: flex; gap: 22px; }
 
@@ -343,7 +354,7 @@ body {
   border-color: var(--accent);
   font-weight: 600;
 }
-.btn-primary:hover { filter: brightness(1.08); }
+.btn-primary:hover { background: #6ee7a0; border-color: #6ee7a0; }
 
 .insp-list { display: flex; flex-direction: column; gap: 10px; }
 

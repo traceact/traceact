@@ -35,7 +35,7 @@
         <div class="subtitle">
           <span id="source-name" class="muted">no source</span>
           <span class="muted">·</span>
-          <button class="source-picker" id="source-picker">
+          <button class="source-picker empty" id="source-picker">
             <span id="source-path">select a source</span> ▾
           </button>
         </div>
@@ -63,7 +63,7 @@
               <tbody id="log-body"></tbody>
             </table>
             <div id="log-empty" class="empty-state">
-              No traces yet. Add a source, then run your traced app.
+              No traces yet. <a id="empty-add-source" href="#" style="color:var(--accent);text-decoration:none">Add a source</a>, then run your traced app.
             </div>
           </div>
 

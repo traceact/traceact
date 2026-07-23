@@ -90,6 +90,7 @@ function selectSource(name) {
   document.getElementById("source-name").textContent = source.name;
   document.getElementById("source-name").classList.remove("muted");
   document.getElementById("source-path").textContent = source.path;
+  document.getElementById("source-picker").classList.remove("empty");
 
   openStream(name);
   renderLog();
@@ -667,6 +668,7 @@ function saveSettings() {
 
 function wireModal() {
   document.getElementById("source-picker").addEventListener("click", openModal);
+  document.getElementById("empty-add-source").addEventListener("click", (e) => { e.preventDefault(); openModal(); });
 
   // Path-input fallback (inside <details>).
   document.getElementById("source-add").addEventListener("click", () => {
