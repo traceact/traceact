@@ -25,6 +25,8 @@
 #
 #   ConsoleSink   — prints traces to stdout.
 
+__version__ = "0.2.0"
+
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
 from traceact.trace import ActionTrace
@@ -32,6 +34,7 @@ from traceact.decorators import traced_action
 from traceact.sinks import JsonlSink, ConsoleSink
 
 __all__ = [
+    "__version__",
     "ActionTrace",
     "TraceConfig",
     "TraceBudget",
