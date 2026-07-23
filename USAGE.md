@@ -2,6 +2,32 @@
 
 Full API and CLI documentation for TraceAct.
 
+## Package layout
+
+```
+traceact/
+  __init__.py     — public exports
+  trace.py        — ActionTrace class, core lifecycle
+  decorators.py   — @traced_action decorator (sync + async)
+  config.py       — TraceConfig, configure(), reset_config()
+  budget.py       — TraceBudget, TraceBudget.production() preset
+  context.py      — ContextVar for active trace, SKIP sentinel
+  sinks.py        — JsonlSink (thread-safe), ConsoleSink, AsyncSink (not yet public)
+  helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
+  ids.py          — ID generation (trc_, evt_, stp_, corr_ prefixes)
+
+  viewer/
+    cli.py        — `traceact view` / `traceact show` CLI entry point; --new flag
+    server.py     — stdlib ThreadingHTTPServer; SPA + REST + SSE
+    reader.py     — SourceReader: JSONL snapshot + live byte-offset tail
+    instance.py   — single-instance coordination (state file + HTTP probe);
+                    launch_or_connect() for embedding in app backends
+    static/
+      index.html  — single-page app shell
+      styles.css  — design system (dark theme, CSS custom properties)
+      app.js      — all frontend logic (no framework, no build step)
+```
+
 ## Contents
 
 1. [Installation](#installation)
@@ -22,6 +48,7 @@ Full API and CLI documentation for TraceAct.
 16. [Test isolation](#test-isolation)
 17. [Trace record schema](#trace-record-schema)
 18. [Viewing traces](#viewing-traces)
+19. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
 
 ---
 
@@ -673,19 +700,145 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 | `--port N` | `8765` | Port to serve on. Auto-increments if the port is taken. |
 | `--host HOST` | `127.0.0.1` | Interface to bind. Localhost only by default. |
 | `--no-browser` | off | Start the server without opening a browser tab. |
+| `--new` | off | Force a new viewer instance even if one is already running. |
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
+
+### Single-instance behaviour
+
+Running `traceact view` a second time — even for a different source — reuses a viewer that is already running rather than spawning a second server. The new source is added to the running viewer and a browser tab is opened on it. This avoids accumulating background processes across repeated launches during a dev session.
+
+The coordination mechanism is a state file at `~/.traceact/viewer.json` that records the host and port of the running viewer. On each launch, TraceAct probes that address with a health check before deciding whether to reuse or start fresh. A stale state file (crashed or stopped viewer) is ignored and a new server starts normally.
+
+Pass `--new` to bypass this and force a second instance — useful when you want two viewers side-by-side with different sources.
+
+### Adding sources in the viewer
+
+The "Add source" modal supports three ways to load a source:
+
+- **Choose file / Choose folder buttons** — opens a native macOS file or folder picker. The picker runs on the server side via AppleScript (`osascript`), so it returns the real filesystem path and the viewer can tail it live. (Falls back to a `tkinter` dialog on non-macOS platforms.)
+- **Drag and drop** — drop a `.jsonl` file onto the drop zone. The browser reads the file contents and posts them to the server, which saves a copy to `~/.traceact/imports/` and adds it as a source. Because the server holds a copy (not the original), this is a **static snapshot** — new writes to the original file won't appear. The viewer labels imported sources accordingly.
+- **Type a path** — a collapsible text input for pasting or typing an absolute path. This gives live tailing just like the command-line argument.
+
+### macOS launcher (`launch.command`)
+
+`launch.command` is a double-clickable shell script in the repo root. Opening it from Finder:
+
+1. Probes port 8765 — if a viewer is already running, opens it immediately and exits.
+2. Finds Python 3.9+ on the machine (checks pyenv shims, Homebrew, system Python).
+3. Creates (or reuses) a `.venv/` virtual environment in the same directory.
+4. Installs or upgrades `traceact` inside that venv.
+5. Runs `traceact view`, waits for the server to be ready, then opens the browser.
+
+The Terminal window stays open so Ctrl+C stops the viewer cleanly. To pass a source file at launch from a script: `open launch.command path/to/traces.jsonl`.
 
 ### What the viewer shows
 
 - **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, or touched target. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view.
-- **Trace inspector** — selecting a trace shows its id (plus parent and root trace ids when it is a child trace), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
-- **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. It plays as a step-through replay along the trace path, with a speed slider (1×–10×) and pause/play.
+- **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
+- **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play.
+- **Settings** — accent colour, display density, default trace view, row count, and default replay speed — all persisted to `localStorage`.
+
+### Viewer server API
+
+These endpoints are available while a viewer is running. Apps and scripts can call them directly.
+
+| Method | Path | Request | Response |
+|---|---|---|---|
+| `GET` | `/api/health` | — | `{"status":"ok","version":"0.2.0","sources":N}` |
+| `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
+| `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |
+| `GET` | `/api/pick?type=file\|folder` | — | `{"path":"...","cancelled":bool}` |
+| `POST` | `/api/import` | `{"name":"file.jsonl","content":"..."}` | `{"name":"...","path":"...","imported":true}` |
+| `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
+
+The SSE stream delivers one `snapshot` message (the last N traces as a JSON array) then `append` messages for each newly-written trace. A `": keepalive"` comment is sent every 0.5 s when nothing new arrives, to keep the connection alive through proxies.
 
 ### Notes
 
 - The viewer is a **local, single-node development tool**. It reads files on the machine it runs on. Exposing one machine's traces to another over the network (`traceact serve`) is planned for a later version.
-- The viewer server binds to localhost by default. Only pass `--host 0.0.0.0` if you understand that it exposes trace data (which can contain sensitive fields) to your network.
+- The viewer server binds to localhost by default. Only pass `--host 0.0.0.0` if you understand that it exposes trace data (which may contain sensitive payloads) to your network.
+
+---
+
+## Integrating the viewer into your app
+
+If your app has its own web UI, you can add a "traceact viewer" button that opens the viewer in a new tab — starting it automatically if it isn't already running.
+
+### Backend route
+
+Add a route that calls `launch_or_connect()`. It checks for a running viewer (via `~/.traceact/viewer.json` + health probe), adds your trace source to it, and returns the URL. If no viewer is running it spawns one as a background subprocess and waits up to 3 seconds for it to be ready.
+
+**FastAPI:**
+```python
+from traceact.viewer.instance import launch_or_connect
+
+@router.get("/api/launch-viewer")
+async def launch_viewer():
+    url = launch_or_connect(source="data/traces/traces.jsonl")
+    return {"url": url}
+```
+
+**Flask:**
+```python
+from traceact.viewer.instance import launch_or_connect
+from flask import jsonify
+
+@app.get("/api/launch-viewer")
+def launch_viewer():
+    url = launch_or_connect(source="data/traces/traces.jsonl")
+    return jsonify({"url": url})
+```
+
+`launch_or_connect` signature:
+
+```python
+launch_or_connect(
+    source=None,      # path to .jsonl file or folder; added to running viewer if given
+    host="127.0.0.1", # host to bind if starting a new viewer
+    port=8765,        # port to try if starting a new viewer
+    open_browser=False,
+    timeout=3.0,      # seconds to wait for a freshly started server to be ready
+) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/"
+```
+
+### Frontend button
+
+The button should be a `<button>` (not an `<a href>`), so you can disable it and show a loading state while the backend starts the viewer:
+
+```javascript
+document.getElementById("btn-traceact-viewer").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-traceact-viewer");
+    btn.disabled = true;
+    btn.textContent = "opening…";
+    try {
+        const { url } = await fetch("/api/launch-viewer").then(r => r.json());
+        window.open(url, "_blank", "noopener");
+    } catch {
+        window.open("http://127.0.0.1:8765/", "_blank", "noopener");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "traceact viewer";
+    }
+});
+```
+
+The fallback `window.open` in the `catch` block handles the case where the backend route doesn't exist yet (e.g. during development), so the button always does something useful.
+
+### Direct API access (no backend route)
+
+If adding a backend route isn't practical, the frontend can probe the viewer directly:
+
+```javascript
+async function openViewer() {
+    try {
+        await fetch("http://127.0.0.1:8765/api/health", { mode: "no-cors" });
+    } catch { /* not running — tell the user to start it */ }
+    window.open("http://127.0.0.1:8765/", "_blank", "noopener");
+}
+```
+
+Note: cross-origin `fetch` to the viewer will always be blocked by CORS unless the viewer adds an `Access-Control-Allow-Origin` header (it doesn't, by design). Use `mode: "no-cors"` only to warm up the connection; don't try to read the response. The backend-route approach above is cleaner because it doesn't depend on the client being on the same machine as the viewer.
 
 ---
 
