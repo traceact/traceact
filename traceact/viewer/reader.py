@@ -84,6 +84,13 @@ class SourceReader:
         # New files that appear later (e.g. a new shard) start at offset 0 and
         # so are read from their beginning on the next poll.
         self._offsets: Dict[str, int] = {}
+        # Per-file inode number. When a file is deleted and recreated at the same
+        # path the inode changes even if the new file is larger than the old one,
+        # so a size-only check would seek into the wrong position. Tracking the
+        # inode lets us detect replacement (not just truncation) reliably.
+        # st_ino is 0 on Windows (inodes unavailable); the check is a safe no-op
+        # there and falls back to the existing truncation-only detection.
+        self._inodes: Dict[str, int] = {}
 
     # -- initial load ------------------------------------------------------
 
@@ -110,6 +117,9 @@ class SourceReader:
                             ring.append(obj)
                     # Record where we stopped so poll() reads only new bytes.
                     self._offsets[filepath] = _file_size(filepath)
+                    # Record which physical file we just read, so poll() can
+                    # tell a delete+recreate apart from a plain append.
+                    self._inodes[filepath] = _file_inode(filepath)
             except OSError:
                 # A file that vanished or can't be opened is simply skipped.
                 continue
@@ -120,22 +130,37 @@ class SourceReader:
 
     # -- live tail ---------------------------------------------------------
 
-    def poll(self) -> List[Dict[str, Any]]:
+    def poll(self, limit: int) -> Dict[str, Any]:
         """
-        Return valid traces appended since the last snapshot() or poll().
+        Return traces that arrived since the last snapshot() or poll().
 
-        Handles three cases per file:
-          - new bytes appended  → read and parse them from the stored offset.
-          - a brand-new file    → offset defaults to 0, so it's read in full.
-          - a truncated/rotated file (size < stored offset) → reset to 0 and
-            re-read, since the previous contents are gone.
+        Handles four cases per file:
+          - new bytes appended   → read and parse them from the stored offset.
+          - a brand-new file     → offset defaults to 0, so it's read in full.
+          - a truncated file     → size < stored offset; reset to 0 and re-read.
+          - a deleted+recreated file at the same path → its inode changes even
+            though the new file may be larger than the old offset, so a
+            size-only check can't detect it: it would silently seek into the
+            middle of unrelated new content and drop everything before that
+            byte position. Detected here by comparing `st_ino` across calls.
 
-        Returns newest-last (arrival order), which the viewer prepends to the
-        top of the log as they come in.
+        On a plain append, returns {"kind": "append", "traces": [...]}
+        (newest-last, arrival order — the caller prepends these to the top of
+        the log). If any file was replaced, the reader instead rebuilds a full
+        snapshot from scratch (so no earlier trace is lost) and returns
+        {"kind": "snapshot", "traces": [...]} (newest-first) — the caller
+        should replace its trace list rather than prepend onto it.
         """
         fresh: List[Dict[str, Any]] = []
+        replaced = False
 
         for filepath in _jsonl_files(self.path):
+            inode = _file_inode(filepath)
+            prior_inode = self._inodes.get(filepath)
+            if prior_inode is not None and inode is not None and inode != prior_inode:
+                replaced = True
+            self._inodes[filepath] = inode
+
             size = _file_size(filepath)
             offset = self._offsets.get(filepath, 0)
 
@@ -159,7 +184,13 @@ class SourceReader:
             except OSError:
                 continue
 
-        return fresh
+        if replaced:
+            # Discard whatever `fresh` picked up from the wrong byte offset
+            # and rebuild cleanly. snapshot() re-reads every file from the
+            # start and refreshes both _offsets and _inodes.
+            return {"kind": "snapshot", "traces": self.snapshot(limit)}
+
+        return {"kind": "append", "traces": fresh}
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +220,22 @@ def _file_size(filepath: str) -> int:
         return os.path.getsize(filepath)
     except OSError:
         return 0
+
+
+def _file_inode(filepath: str) -> Optional[int]:
+    """
+    Inode number for a file, or None if it can't be determined.
+
+    st_ino is 0 on some Windows filesystems where Python can't populate it;
+    treated as unknown there so replacement detection simply doesn't trigger
+    (falling back to the existing truncation-only check) rather than firing
+    false positives on every poll.
+    """
+    try:
+        ino = os.stat(filepath).st_ino
+    except OSError:
+        return None
+    return ino or None
 
 
 def _started_at_key(trace: Dict[str, Any]) -> str:

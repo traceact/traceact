@@ -274,11 +274,14 @@ class _Handler(BaseHTTPRequestHandler):
 
             # Phase 2: the live tail — poll for appended traces forever, until
             # the browser disconnects (which surfaces as a write error).
+            # poll() returns kind="snapshot" instead of "append" when a source
+            # file was deleted and recreated mid-stream, so the client replaces
+            # its trace list instead of prepending onto stale data.
             while True:
                 time.sleep(_POLL_INTERVAL_SECONDS)
-                fresh = reader.poll()
-                if fresh:
-                    self._send_event({"kind": "append", "traces": fresh})
+                result = reader.poll(limit)
+                if result["traces"]:
+                    self._send_event(result)
                 else:
                     # A comment line acts as a heartbeat: it keeps the
                     # connection alive and lets us notice a dropped client.
