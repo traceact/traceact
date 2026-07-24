@@ -38,6 +38,7 @@ function init() {
   wireSettings();
   wireModal();
   wireReplayControls();
+  wireDoctor();
 
   refreshSources().then(() => {
     // If a source was seeded on the command line, stream the first one.
@@ -670,6 +671,89 @@ function loadSettings() {
 function saveSettings() {
   try { localStorage.setItem("traceact.settings", JSON.stringify(state.settings)); }
   catch (e) { /* private mode; ignore */ }
+}
+
+/* ---- Diagnostics (Settings > Run diagnostics) ------------------------ */
+/* Runs the same checks as `traceact doctor` on the CLI, via GET /api/doctor,
+ * and renders them as a staggered checklist with a progress bar. The server
+ * runs every check synchronously in one request (they're all near-instant —
+ * a version check, a directory-permission check, an optional file read) so
+ * there's nothing to poll; the stagger below is a readability aid so results
+ * appear as a checklist filling in rather than all at once, not a simulation
+ * of slow work. */
+
+function wireDoctor() {
+  document.getElementById("run-doctor").addEventListener("click", runDoctor);
+}
+
+async function runDoctor() {
+  const btn = document.getElementById("run-doctor");
+  const progress = document.getElementById("doctor-progress");
+  const fill = document.getElementById("doctor-progress-fill");
+  const label = document.getElementById("doctor-progress-label");
+  const results = document.getElementById("doctor-results");
+
+  btn.disabled = true;
+  results.hidden = true;
+  results.innerHTML = "";
+  progress.hidden = false;
+  fill.style.width = "0%";
+  label.textContent = "Running diagnostics…";
+
+  let data;
+  try {
+    const params = state.currentSource
+      ? `?source=${encodeURIComponent(state.sources.find((s) => s.name === state.currentSource)?.path || "")}`
+      : "";
+    const res = await fetch(`/api/doctor${params}`);
+    data = await res.json();
+  } catch (e) {
+    progress.hidden = true;
+    results.hidden = false;
+    results.innerHTML = `<div class="doctor-check fail">
+      <span class="doctor-icon">✗</span>
+      <div><div class="doctor-message">Could not reach the viewer server to run diagnostics.</div></div>
+    </div>`;
+    btn.disabled = false;
+    return;
+  }
+
+  const checks = data.checks || [];
+  const total = checks.length;
+
+  for (let i = 0; i < total; i++) {
+    label.textContent = `Running check ${i + 1}/${total}…`;
+    fill.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+    appendDoctorCheck(results, checks[i]);
+    results.hidden = false;
+    // Short stagger so the checklist visibly fills in rather than jumping to
+    // a wall of text — all checks have already run server-side by this point.
+    if (i < total - 1) await new Promise((r) => setTimeout(r, 120));
+  }
+
+  progress.hidden = true;
+  const summary = document.createElement("div");
+  summary.className = `doctor-summary ${data.ok ? "ok" : "fail"}`;
+  summary.textContent = data.ok
+    ? "All checks passed."
+    : "Some checks failed — see above.";
+  results.appendChild(summary);
+
+  btn.disabled = false;
+}
+
+function appendDoctorCheck(container, check) {
+  const row = document.createElement("div");
+  row.className = `doctor-check ${check.status}`;
+  const icon = check.status === "pass" ? "✓" : check.status === "fail" ? "✗" : "·";
+  row.innerHTML = `
+    <span class="doctor-icon">${icon}</span>
+    <div>
+      <div class="doctor-message">${esc(check.message)}</div>
+      ${check.hint ? `<div class="doctor-hint">${esc(check.hint)}</div>` : ""}
+    </div>
+  `;
+  container.appendChild(row);
 }
 
 /* ---- Modal (add source) --------------------------------------------- */

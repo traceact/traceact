@@ -7,6 +7,7 @@
 #   GET  /                        the single-page app (static/index.html)
 #   GET  /static/<file>           the app's CSS and JS
 #   GET  /api/health              {"status":"ok","version":"<pkg version>","sources":N}
+#   GET  /api/doctor?source=      run health checks (see viewer/doctor.py); JSON
 #   GET  /api/sources             list configured sources (JSON)
 #   POST /api/sources             add a source by path (JSON body)
 #   GET  /api/pick?type=file|folder  open a native OS dialog; returns {"path":"..."}
@@ -128,6 +129,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_static(route[len("/static/"):])
         elif route == "/api/health":
             self._serve_health()
+        elif route == "/api/doctor":
+            self._serve_doctor(parse_qs(parsed.query))
         elif route == "/api/sources":
             self._serve_sources()
         elif route == "/api/pick":
@@ -177,6 +180,16 @@ class _Handler(BaseHTTPRequestHandler):
             "version": __version__,
             "sources": len(self.server.state.sources),  # type: ignore[attr-defined]
         })
+
+    # -- doctor --------------------------------------------------------------
+
+    def _serve_doctor(self, query: Dict[str, list]) -> None:
+        # Same checks as `traceact doctor` on the CLI — see viewer/doctor.py.
+        # Optionally validate a specific source path; the Settings page passes
+        # the currently active source's path if one is loaded.
+        from traceact.viewer.doctor import run_checks
+        source = _first(query.get("source"))
+        self._send_json(200, run_checks(source))
 
     # -- native OS file/folder picker --------------------------------------
 

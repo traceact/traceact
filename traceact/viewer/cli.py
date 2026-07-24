@@ -24,16 +24,13 @@
 #   --no-browser    start the server but do not open a browser tab
 
 import argparse
-import json
-import os
 import sys
 import threading
 import webbrowser
 from typing import Optional
 
-from traceact import __version__
+from traceact.viewer import doctor as _doctor
 from traceact.viewer.server import ViewerServer, ViewerState
-from traceact.viewer.reader import is_valid_trace, _jsonl_files
 import traceact.viewer.instance as _instance
 
 _DEFAULT_PORT = 8765
@@ -188,108 +185,33 @@ def _run_view(args: argparse.Namespace) -> int:
 
 def _run_doctor(args: argparse.Namespace) -> int:
     """
-    Run a handful of local checks and print a pass/fail report:
+    Run traceact.viewer.doctor.run_checks() and print a pass/fail report.
 
-      - the running Python version meets the 3.9 minimum
-      - the ~/.traceact state directory can be created and is writable
-        (single-instance coordination and drag-drop imports depend on this)
-      - whether a viewer is currently running (informational only — a viewer
-        isn't required for tracing to work)
-      - if SOURCE is given: that it exists and its lines parse as valid traces
+    The Settings page's "Run diagnostics" button (GET /api/doctor) runs the
+    exact same checks via the same shared module — this function only differs
+    in how it renders the result (text here, JSON there).
 
     Returns 0 if every check that can fail passed, 1 otherwise. A missing
-    running viewer is never a failure by itself.
+    running viewer is never a failure by itself (reported as "info").
     """
-    ok = True
+    result = _doctor.run_checks(args.source)
+
     print("traceact doctor")
     print()
-
-    py_ok = sys.version_info >= (3, 9)
-    _report(py_ok, f"Python {sys.version_info.major}.{sys.version_info.minor} "
-                   f"({'OK, 3.9+ required' if py_ok else 'below the 3.9 minimum'})")
-    ok = ok and py_ok
-
-    print(f"  ·  traceact {__version__}")
-
-    state_dir = os.path.expanduser("~/.traceact")
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        writable = os.access(state_dir, os.W_OK)
-    except OSError:
-        writable = False
-    _report(writable, f"State directory ({state_dir}) is writable")
-    ok = ok and writable
-
-    existing = _instance.find_running()
-    if existing is not None:
-        health = existing["health"]
-        print(
-            f"  ·  Viewer running at http://{existing['host']}:{existing['port']}/ "
-            f"(v{health.get('version', '?')}, {health.get('sources', 0)} source(s))"
-        )
-    else:
-        print("  ·  No viewer currently running (not required).")
-
-    if args.source is not None:
-        ok = _check_source(args.source) and ok
+    for check in result["checks"]:
+        if check["status"] == "info":
+            print(f"  ·  {check['message']}")
+        else:
+            print(f"  {'✓' if check['status'] == 'pass' else '✗'}  {check['message']}")
+            if check.get("hint"):
+                print(f"       → {check['hint']}")
 
     print()
-    if ok:
+    if result["ok"]:
         print("All checks passed.")
     else:
         print("Some checks failed — see above.", file=sys.stderr)
-    return 0 if ok else 1
-
-
-def _check_source(path: str) -> bool:
-    """
-    Validate a SOURCE passed to `doctor`: it must exist and contain at least
-    one .jsonl file whose lines parse as JSON and look like trace records.
-    An empty (freshly created) source is reported as fine, not a failure.
-    """
-    if not os.path.exists(path):
-        _report(False, f"Source '{path}' does not exist")
-        return False
-
-    files = _jsonl_files(path)
-    if not files:
-        _report(False, f"Source '{path}' has no .jsonl files")
-        return False
-
-    total_lines = 0
-    valid_lines = 0
-    for filepath in files:
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    total_lines += 1
-                    try:
-                        if is_valid_trace(json.loads(line)):
-                            valid_lines += 1
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-        except OSError as e:
-            _report(False, f"Could not read {filepath}: {e}")
-            return False
-
-    if total_lines == 0:
-        print(f"  ·  {path}: {len(files)} file(s), no trace lines yet.")
-        return True
-
-    passed = valid_lines > 0
-    _report(
-        passed,
-        f"{path}: {valid_lines}/{total_lines} line(s) look like valid traces "
-        f"across {len(files)} file(s)",
-    )
-    return passed
-
-
-def _report(passed: bool, message: str) -> None:
-    print(f"  {'✓' if passed else '✗'}  {message}")
+    return 0 if result["ok"] else 1
 
 
 def _start_server(host: str, port: int, state: ViewerState):

@@ -23,6 +23,8 @@ traceact/
     server.py     — stdlib ThreadingHTTPServer; SPA + REST + SSE
     reader.py     — SourceReader: JSONL snapshot + live byte-offset tail,
                     with inode-based delete+recreate detection
+    doctor.py     — run_checks(): shared health-check logic behind both
+                    `traceact doctor` and GET /api/doctor (Settings > Run diagnostics)
     instance.py   — single-instance coordination (state file + HTTP probe);
                     launch_or_connect() for embedding in app backends
     static/
@@ -987,10 +989,14 @@ The Terminal window stays open so Ctrl+C stops the viewer cleanly. To pass a sou
 
 ### What the viewer shows
 
-- **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, or touched target. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view.
-- **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
+- **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view.
+- **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
 - **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play.
-- **Settings** — accent colour, display density, default trace view, row count, and default replay speed — all persisted to `localStorage`.
+- **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
+
+### Run diagnostics (Settings)
+
+The Settings page has a "Run diagnostics" button that runs the exact same checks as `traceact doctor` on the command line, via `GET /api/doctor` — Python version, state directory writability, whether a viewer is running, and (if a source is loaded) whether its trace data looks valid. Results appear as a checklist with a short progress indicator, and each failing check shows a one-line explanation of what it means and what to do about it. Useful when something isn't showing up in the log and you want to rule out a setup problem without opening a terminal.
 
 ### Viewer server API
 
@@ -999,11 +1005,14 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | Method | Path | Request | Response |
 |---|---|---|---|
 | `GET` | `/api/health` | — | `{"status":"ok","version":"0.2.1","sources":N}` |
+| `GET` | `/api/doctor?source=` | — | `{"ok":bool,"version":"...","checks":[{"label","status","message","hint"?}]}` |
 | `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
 | `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |
 | `GET` | `/api/pick?type=file\|folder` | — | `{"path":"...","cancelled":bool}` |
 | `POST` | `/api/import` | `{"name":"file.jsonl","content":"..."}` | `{"name":"...","path":"...","imported":true}` |
 | `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
+
+`/api/doctor`'s `status` is `"pass"`, `"fail"`, or `"info"`; `hint` is present only on `"fail"` checks. `ok` is `true` only if every `"pass"`/`"fail"` check passed — `"info"` checks (traceact's version, whether a viewer is running) never affect it.
 
 The SSE stream delivers one `snapshot` message (the last N traces as a JSON array) then `append` messages for each newly-written trace. A `": keepalive"` comment is sent every 0.5 s when nothing new arrives, to keep the connection alive through proxies.
 

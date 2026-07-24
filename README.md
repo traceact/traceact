@@ -103,7 +103,7 @@ The source modal (click the source name in the header) lets you:
 traceact doctor [SOURCE]
 ```
 
-Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. See [USAGE.md](USAGE.md#viewing-traces) for full output and exit-code details.
+Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](USAGE.md#viewing-traces) for full output and exit-code details.
 
 ## Concepts
 

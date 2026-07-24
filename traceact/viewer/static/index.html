@@ -149,6 +149,20 @@
           <span class="speed-value" id="settings-speed-value">1×</span>
         </div>
       </div>
+
+      <div class="setting">
+        <h3>Diagnostics</h3>
+        <p>Check that TraceAct is set up correctly on this machine: Python version,
+          the state directory, and — if a source is loaded — whether its trace
+          data looks valid. The same checks as <code>traceact doctor</code> on the
+          command line.</p>
+        <button class="btn" id="run-doctor">Run diagnostics</button>
+        <div class="doctor-progress" id="doctor-progress" hidden>
+          <div class="doctor-progress-bar"><div class="doctor-progress-fill" id="doctor-progress-fill"></div></div>
+          <span id="doctor-progress-label">Running check 0/0…</span>
+        </div>
+        <div class="doctor-results" id="doctor-results" hidden></div>
+      </div>
     </main>
   </div>
 

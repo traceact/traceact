@@ -651,4 +651,65 @@ body {
 }
 .add-row input:focus { outline: none; border-color: var(--border-strong); }
 
+/* ---- Diagnostics (Settings > Run diagnostics) ------------------------ */
+
+.doctor-progress { margin-top: 12px; }
+.doctor-progress-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--border-strong);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.doctor-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.15s ease;
+}
+#doctor-progress-label {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.doctor-results { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.doctor-check {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  animation: doctor-reveal 0.2s ease;
+}
+@keyframes doctor-reveal {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.doctor-icon { font-size: 13px; line-height: 1.4; width: 14px; flex-shrink: 0; text-align: center; }
+.doctor-check.pass .doctor-icon { color: var(--status-completed); }
+.doctor-check.fail .doctor-icon { color: var(--status-failed); }
+.doctor-check.info .doctor-icon { color: var(--text-faint); }
+
+.doctor-message { font-size: 12.5px; color: var(--text); }
+.doctor-check.info .doctor-message { color: var(--text-dim); }
+.doctor-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.doctor-summary {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 10px;
+}
+.doctor-summary.ok { color: var(--status-completed); }
+.doctor-summary.fail { color: var(--status-failed); }
+
 [hidden] { display: none !important; }
