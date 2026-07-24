@@ -30,7 +30,7 @@ def run_checks(source: Optional[str] = None) -> Dict[str, Any]:
 
         {
             "ok": bool,             # True if every "pass"/"fail" check passed
-            "version": "0.2.1",
+            "version": "0.3.0",
             "checks": [
                 {"label": str, "status": "pass"|"fail"|"info", "message": str,
                  "hint": str},  # "hint" is present only on "fail" checks —

@@ -949,7 +949,7 @@ $ traceact doctor data/traces/traces.jsonl
 traceact doctor
 
   ✓  Python 3.11 (OK, 3.9+ required)
-  ·  traceact 0.2.1
+  ·  traceact 0.3.0
   ✓  State directory (/Users/you/.traceact) is writable
   ·  No viewer currently running (not required).
   ✓  data/traces/traces.jsonl: 42/42 line(s) look like valid traces across 1 file(s)
@@ -1004,7 +1004,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{"status":"ok","version":"0.2.1","sources":N}` |
+| `GET` | `/api/health` | — | `{"status":"ok","version":"0.3.0","sources":N}` |
 | `GET` | `/api/doctor?source=` | — | `{"ok":bool,"version":"...","checks":[{"label","status","message","hint"?}]}` |
 | `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
 | `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |

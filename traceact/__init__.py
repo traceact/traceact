@@ -28,7 +28,7 @@
 #   REDACTION_PRESETS — named groups of extra redaction patterns; pass their
 #                   names to TraceConfig(redaction_presets=[...]).
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
