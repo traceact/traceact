@@ -745,7 +745,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{"status":"ok","version":"0.2.0","sources":N}` |
+| `GET` | `/api/health` | — | `{"status":"ok","version":"0.2.1","sources":N}` |
 | `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
 | `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |
 | `GET` | `/api/pick?type=file\|folder` | — | `{"path":"...","cancelled":bool}` |

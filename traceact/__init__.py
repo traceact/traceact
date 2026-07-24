@@ -25,7 +25,7 @@
 #
 #   ConsoleSink   — prints traces to stdout.
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget

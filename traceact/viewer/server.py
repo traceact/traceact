@@ -6,7 +6,7 @@
 # What it serves:
 #   GET  /                        the single-page app (static/index.html)
 #   GET  /static/<file>           the app's CSS and JS
-#   GET  /api/health              {"status":"ok","version":"0.2.0","sources":N}
+#   GET  /api/health              {"status":"ok","version":"<pkg version>","sources":N}
 #   GET  /api/sources             list configured sources (JSON)
 #   POST /api/sources             add a source by path (JSON body)
 #   GET  /api/pick?type=file|folder  open a native OS dialog; returns {"path":"..."}
@@ -41,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
+from traceact import __version__
 from traceact.viewer.reader import SourceReader
 
 # Directory where drag-dropped files are saved so they can be tailed.
@@ -173,7 +174,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _serve_health(self) -> None:
         self._send_json(200, {
             "status": "ok",
-            "version": "0.2.0",
+            "version": __version__,
             "sources": len(self.server.state.sources),  # type: ignore[attr-defined]
         })
 
