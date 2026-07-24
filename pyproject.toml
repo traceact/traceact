@@ -57,3 +57,7 @@ include = ["traceact*"]
 # Ship the viewer's static frontend (HTML/CSS/JS) inside the wheel.
 [tool.setuptools.package-data]
 "traceact.viewer" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

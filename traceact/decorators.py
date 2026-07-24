@@ -31,7 +31,22 @@
 # inspect.signature(), applies redaction and size limits, and stores the result
 # on the trace's inputs dict. This never breaks the function call — if capture
 # fails for any reason, it is silently skipped (unless strict=True).
+#
+# Why capture_inputs is folded into the TraceConfig override at decoration time:
+# @traced_action(capture_inputs=...) is a convenience shorthand for the same
+# setting also available as @traced_action(config=TraceConfig(capture_inputs=...)).
+# Both must resolve through _resolve_config() in trace.py — the single place
+# that merges package defaults, configure()-level settings, and this trace's
+# override, and that enforces the "package-level capture_inputs=False is a
+# global kill switch a decorator cannot override" rule. If the wrapper gated
+# capture on the raw decorator-local `capture_inputs` value instead, package-
+# level configure(config=TraceConfig(capture_inputs=True)) would silently do
+# nothing whenever a decorator didn't also repeat capture_inputs=True itself —
+# which is exactly what happened before this was fixed. Folding the shorthand
+# into the config override at decoration time (see decorator(), below) means
+# there is one resolution path, not two independent ones.
 
+import copy
 import functools
 import inspect
 from typing import Any, Dict, List, Optional, Union
@@ -57,7 +72,7 @@ def traced_action(
     operation: Optional[str] = None,
     target: Optional[str] = None,
     database: Optional[str] = None,
-    capture_inputs: Any = False,
+    capture_inputs: Any = None,
     meta: Optional[Dict[str, Any]] = None,
     config: Optional[TraceConfig] = None,
     budget: Optional[TraceBudget] = None,
@@ -105,11 +120,21 @@ def traced_action(
 
         capture_inputs:
             Controls whether function arguments are automatically recorded.
-            False (default): no automatic capture.
+            None (default): defer to the package-level setting from
+                  configure(config=TraceConfig(capture_inputs=...)), or no
+                  capture if that isn't set either.
+            False: explicitly disable capture for this decorator, regardless
+                  of the package-level setting.
             True: capture all named arguments (excluding self/cls), with
                   redaction and size limits applied.
             list of strings: capture only the named arguments in the list.
                              This is the safest and most explicit form.
+
+            This is shorthand for config=TraceConfig(capture_inputs=...) — set
+            both and this parameter wins for capture_inputs specifically, but
+            every other field on config still applies. A package-level
+            capture_inputs=False set via configure() is a global kill switch:
+            no decorator, including via this parameter, can re-enable capture.
 
         meta:
             Arbitrary key-value data to attach to the trace. TraceAct stores
@@ -166,17 +191,29 @@ def traced_action(
                 ...
     """
     def decorator(func: Any) -> Any:
+        # Fold the capture_inputs= shorthand into the TraceConfig override so
+        # it resolves through _resolve_config() alongside every other config
+        # field, instead of being a second, disconnected mechanism (see the
+        # module-level comment above). Done once here, not per call, since
+        # config/capture_inputs are fixed for the lifetime of this decorated
+        # function. copy.copy() (rather than re-listing fields) means this
+        # keeps working as TraceConfig gains new fields in the future.
+        resolved_config = config
+        if capture_inputs is not None:
+            resolved_config = copy.copy(config) if config is not None else TraceConfig()
+            resolved_config.capture_inputs = capture_inputs
+
         # Decide now (at decoration time, not call time) which wrapper to use.
         # This avoids an inspect.iscoroutinefunction() check on every call.
         if inspect.iscoroutinefunction(func):
             return _async_wrapper(
                 func, action, kind, actor, project, operation, target,
-                database, capture_inputs, meta, config, budget, correlation_id,
+                database, meta, resolved_config, budget, correlation_id,
             )
         else:
             return _sync_wrapper(
                 func, action, kind, actor, project, operation, target,
-                database, capture_inputs, meta, config, budget, correlation_id,
+                database, meta, resolved_config, budget, correlation_id,
             )
 
     return decorator
@@ -195,7 +232,6 @@ def _sync_wrapper(
     operation: Optional[str],
     target: Optional[str],
     database: Optional[str],
-    capture_inputs: Any,
     meta: Optional[Dict[str, Any]],
     config: Optional[TraceConfig],
     budget: Optional[TraceBudget],
@@ -209,6 +245,12 @@ def _sync_wrapper(
         2. If skipped (sampled out): push SKIP onto ContextVar, run function, restore.
         3. If no-op (disabled / depth exceeded): run function with no context changes.
         4. If real trace: push trace, capture inputs, run function, finish, restore.
+
+    Note: capture_inputs is no longer a separate parameter here — the
+    decorator() function above folds it into `config` before calling this, so
+    the single source of truth for "should capture happen, and with what
+    spec" is trace._effective_config.capture_inputs (read below, after the
+    trace is created), not a value threaded through independently.
     """
 
     @functools.wraps(func)
@@ -253,9 +295,13 @@ def _sync_wrapper(
         try:
             # Optionally capture function arguments as trace inputs.
             # This happens before the function runs so inputs are recorded even
-            # if the function raises immediately.
-            if capture_inputs is not False:
-                _capture_inputs(trace, func, args, kwargs, capture_inputs)
+            # if the function raises immediately. Read from the fully resolved
+            # config (package default → configure() → this decorator's
+            # capture_inputs=/config= override, kill switch already applied)
+            # rather than a value threaded separately through the wrapper.
+            resolved_capture_inputs = trace._effective_config.capture_inputs
+            if resolved_capture_inputs is not False:
+                _capture_inputs(trace, func, args, kwargs, resolved_capture_inputs)
 
             # Run the actual function.
             result = func(*args, **kwargs)
@@ -290,7 +336,6 @@ def _async_wrapper(
     operation: Optional[str],
     target: Optional[str],
     database: Optional[str],
-    capture_inputs: Any,
     meta: Optional[Dict[str, Any]],
     config: Optional[TraceConfig],
     budget: Optional[TraceBudget],
@@ -303,6 +348,9 @@ def _async_wrapper(
     ContextVar is async-safe in Python 3.7+: each asyncio Task inherits a copy
     of the current context from the task that created it. Within a single Task,
     the ContextVar behaves like a call-stack variable.
+
+    Note: capture_inputs is folded into `config` by decorator() before this is
+    called — see _sync_wrapper's docstring for why.
     """
 
     @functools.wraps(func)
@@ -338,8 +386,9 @@ def _async_wrapper(
         token = push_trace(trace)
 
         try:
-            if capture_inputs is not False:
-                _capture_inputs(trace, func, args, kwargs, capture_inputs)
+            resolved_capture_inputs = trace._effective_config.capture_inputs
+            if resolved_capture_inputs is not False:
+                _capture_inputs(trace, func, args, kwargs, resolved_capture_inputs)
 
             result = await func(*args, **kwargs)
             trace._finish(status="completed")

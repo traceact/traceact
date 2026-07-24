@@ -152,6 +152,13 @@ document.getElementById("btn-viewer").addEventListener("click", async () => {
 
 Python 3.9+. No runtime dependencies.
 
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
 ## Full reference
 
 See [USAGE.md](USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`), input capture, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.

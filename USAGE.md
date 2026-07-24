@@ -12,20 +12,25 @@ traceact/
   config.py       — TraceConfig, configure(), reset_config()
   budget.py       — TraceBudget, TraceBudget.production() preset
   context.py      — ContextVar for active trace, SKIP sentinel
-  sinks.py        — JsonlSink (thread-safe), ConsoleSink, AsyncSink (not yet public)
+  redaction.py    — SENSITIVE_PATTERNS baseline + REDACTION_PRESETS registry
+  sinks.py        — JsonlSink (thread-safe, rotation via max_bytes), ConsoleSink,
+                    AsyncSink (not yet public)
   helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
   ids.py          — ID generation (trc_, evt_, stp_, corr_ prefixes)
 
   viewer/
-    cli.py        — `traceact view` / `traceact show` CLI entry point; --new flag
+    cli.py        — `traceact view` / `traceact show` / `traceact doctor` CLI entry point
     server.py     — stdlib ThreadingHTTPServer; SPA + REST + SSE
-    reader.py     — SourceReader: JSONL snapshot + live byte-offset tail
+    reader.py     — SourceReader: JSONL snapshot + live byte-offset tail,
+                    with inode-based delete+recreate detection
     instance.py   — single-instance coordination (state file + HTTP probe);
                     launch_or_connect() for embedding in app backends
     static/
       index.html  — single-page app shell
       styles.css  — design system (dark theme, CSS custom properties)
       app.js      — all frontend logic (no framework, no build step)
+
+tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 ```
 
 ## Contents
@@ -129,7 +134,7 @@ from traceact import traced_action, TraceConfig, TraceBudget
     operation="insert",             # creates an initial event if provided with target
     target="notes",                 # the resource (table, endpoint, file, model)
     database="sqlite",              # for kind="db" traces
-    capture_inputs=False,           # False | True | ["field1", "field2"]
+    capture_inputs=True,             # None (defer to package config) | False | True | ["field1", "field2"]
     meta={"release": "v1.2"},       # arbitrary key-value data
     config=TraceConfig(strict=True),# override package config for this trace only
     budget=TraceBudget(max_events=50), # override budget for this trace only
@@ -541,7 +546,7 @@ Traces from the enqueue side and the worker side won't share a `parent_trace_id`
 
 ## Input capture
 
-By default, `@traced_action` doesn't capture function arguments.
+By default, `@traced_action` doesn't capture function arguments — `capture_inputs` defaults to `None`, which means "defer to the package-level setting from `configure()`, or no capture if that isn't set either."
 
 **Capture selected fields (recommended):**
 
@@ -555,7 +560,7 @@ def create_note(title, body, user_id):
     ...
 ```
 
-**Capture all arguments:**
+**Capture all arguments (per decorator):**
 
 ```python
 @traced_action(action="note.create", kind="app", capture_inputs=True)
@@ -563,7 +568,19 @@ def create_note(title, body, user_id):
     ...
 ```
 
-**Global kill switch** (overrides all decorator-level settings):
+**Capture all arguments (package-wide default):**
+
+```python
+configure(config=TraceConfig(capture_inputs=True))
+
+@traced_action(action="note.create", kind="app")  # no capture_inputs needed here
+def create_note(title, body, user_id):
+    ...
+```
+
+`capture_inputs=` on the decorator is shorthand for `config=TraceConfig(capture_inputs=...)` — both resolve through the same package-default → `configure()` → decorator-override chain, so a package-level default set via `configure()` is honoured by any decorator that doesn't explicitly override it.
+
+**Global kill switch** (cannot be re-enabled by any decorator, not even one that explicitly passes `capture_inputs=True`):
 
 ```python
 configure(config=TraceConfig(capture_inputs=False))
@@ -791,6 +808,13 @@ def test_create_note():
         assert result["note_id"] is not None
     finally:
         reset_config()
+```
+
+**TraceAct's own test suite** lives in `tests/` at the repo root and follows this exact pattern — a `_clean_config` autouse fixture in `tests/conftest.py` calls `reset_config()` before and after every test. Run it with:
+
+```bash
+pip install -e ".[dev]"
+pytest
 ```
 
 ---
