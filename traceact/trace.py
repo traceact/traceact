@@ -48,6 +48,7 @@ from traceact.config import (
 from traceact.context import SKIP, get_active_trace, is_skip, pop_trace, push_trace
 from traceact.helpers import TraceHelpersMixin
 from traceact.ids import new_event_id, new_step_id, new_trace_id
+from traceact.redaction import REDACTION_PRESETS, SENSITIVE_PATTERNS
 from traceact.sinks import ConsoleSink, buffer_record, flush_buffer
 
 
@@ -61,30 +62,26 @@ from traceact.sinks import ConsoleSink, buffer_record, flush_buffer
 # other secrets from appearing in trace output.
 #
 # Matching is case-insensitive and uses substring matching: "user_password"
-# matches because "password" appears in it.
+# matches because "password" appears in it. SENSITIVE_PATTERNS (the always-on
+# baseline) plus any opt-in REDACTION_PRESETS the caller selected are merged
+# into one set by _resolve_config() and passed down as `patterns` here — see
+# traceact/redaction.py for where both are defined.
 
-_SENSITIVE_PATTERNS = frozenset({
-    "password", "passwd", "pwd",
-    "secret", "token", "api_key", "apikey",
-    "private_key", "privatekey",
-    "access_key", "accesskey",
-    "auth", "credential", "credentials",
-    "credit_card", "card_number", "cvv", "ssn",
-})
-
-
-def _is_sensitive(field_name: str) -> bool:
+def _is_sensitive(field_name: str, patterns: "frozenset" = SENSITIVE_PATTERNS) -> bool:
     """
     Return True if the field name matches a known sensitive pattern.
 
     Args:
         field_name: The argument or field name to check (e.g. "user_password").
+        patterns:   The set of substrings to match against. Defaults to the
+                    always-on baseline; callers pass the fully resolved set
+                    (baseline + any active presets) from _EffectiveConfig.
 
     Returns:
-        True if any sensitive pattern is a substring of the lowercased name.
+        True if any pattern is a substring of the lowercased field name.
     """
     lower = field_name.lower()
-    return any(pattern in lower for pattern in _SENSITIVE_PATTERNS)
+    return any(pattern in lower for pattern in patterns)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +120,7 @@ class _EffectiveConfig:
     __slots__ = (
         "enabled", "sink_mode", "strict",
         "redact_by_default", "capture_inputs", "capture_outputs",
+        "redaction_patterns",
     )
 
     def __init__(
@@ -133,6 +131,7 @@ class _EffectiveConfig:
         redact_by_default: bool,
         capture_inputs: Any,
         capture_outputs: bool,
+        redaction_patterns: "frozenset",
     ) -> None:
         self.enabled = enabled
         self.sink_mode = sink_mode
@@ -140,6 +139,10 @@ class _EffectiveConfig:
         self.redact_by_default = redact_by_default
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
+        # Baseline SENSITIVE_PATTERNS plus any opt-in REDACTION_PRESETS named
+        # in TraceConfig(redaction_presets=[...]). Only consulted when
+        # redact_by_default is True.
+        self.redaction_patterns = redaction_patterns
 
 
 class _EffectiveBudget:
@@ -199,6 +202,8 @@ def _resolve_config(
     capture_inputs: Any = False   # safe default: no automatic capture
     capture_outputs = True
 
+    redaction_presets: Optional[List[str]] = None
+
     # Apply package-level config from configure(), if set.
     pkg = get_package_config()
     if pkg is not None:
@@ -208,6 +213,7 @@ def _resolve_config(
         if pkg.redact_by_default is not None: redact_by_default = pkg.redact_by_default
         if pkg.capture_inputs is not None:   capture_inputs = pkg.capture_inputs
         if pkg.capture_outputs is not None:  capture_outputs = pkg.capture_outputs
+        if pkg.redaction_presets is not None: redaction_presets = pkg.redaction_presets
 
     # Apply local override from this specific decorator or start() call.
     if local_override is not None:
@@ -217,12 +223,23 @@ def _resolve_config(
         if local_override.redact_by_default is not None: redact_by_default = local_override.redact_by_default
         if local_override.capture_inputs is not None:   capture_inputs = local_override.capture_inputs
         if local_override.capture_outputs is not None:  capture_outputs = local_override.capture_outputs
+        # Replaces (not merges with) the package-level list, same as every
+        # other field here — a decorator that cares enough to override
+        # presets is expected to name the full set it wants.
+        if local_override.redaction_presets is not None: redaction_presets = local_override.redaction_presets
 
     # Safety: if the package-level config explicitly set capture_inputs=False,
     # that is the global kill switch and it cannot be overridden by a decorator.
     # We re-apply the package setting last to enforce this.
     if pkg is not None and pkg.capture_inputs is False:
         capture_inputs = False
+
+    # Merge the always-on baseline with whichever presets are active. Preset
+    # names are validated at TraceConfig construction time, so no further
+    # validation is needed here.
+    redaction_patterns = SENSITIVE_PATTERNS
+    for preset_name in (redaction_presets or []):
+        redaction_patterns = redaction_patterns | REDACTION_PRESETS[preset_name]
 
     return _EffectiveConfig(
         enabled=enabled,
@@ -231,6 +248,7 @@ def _resolve_config(
         redact_by_default=redact_by_default,
         capture_inputs=capture_inputs,
         capture_outputs=capture_outputs,
+        redaction_patterns=redaction_patterns,
     )
 
 
@@ -305,16 +323,23 @@ def _safe_value(
     value: Any,
     max_bytes: int,
     redact: bool,
+    patterns: "frozenset" = SENSITIVE_PATTERNS,
 ) -> Any:
     """
     Sanitise a single value before storing it in a trace record.
 
-    Applies two safety rules:
+    Applies these safety rules, in order:
         1. Redaction: if the field name matches a sensitive pattern and
-           redact=True, replace the value with "[redacted]".
-        2. Size limit: if the JSON representation exceeds max_bytes, replace
+           redact=True, replace the value with "[redacted]". This short-
+           circuits — a redacted value is never recursed into.
+        2. Recursion: if the value is a dict, sanitise its keys the same way
+           (so a field like "headers" or "request" doesn't shield a nested
+           "authorization" or "password" key from redaction). If it's a list,
+           recurse into any dict elements the same way; non-dict elements are
+           left for rule 3/4 below.
+        3. Size limit: if the JSON representation exceeds max_bytes, replace
            the value with a "[truncated: N chars]" summary.
-        3. Serialisability: if the value cannot be JSON-serialised (e.g. a
+        4. Serialisability: if the value cannot be JSON-serialised (e.g. a
            complex object), replace it with a "[TypeName]" summary.
 
     Args:
@@ -322,15 +347,31 @@ def _safe_value(
         value:      The raw value to sanitise.
         max_bytes:  Maximum allowed size in bytes after JSON encoding.
         redact:     Whether to apply redaction rules.
+        patterns:   The fully resolved set of sensitive-name substrings
+                    (baseline + any active presets) to match field names
+                    against, at this level and every nested level.
 
     Returns:
         The original value, "[redacted]", "[truncated: N chars]", or "[TypeName]".
     """
     # Rule 1: Redact sensitive fields.
-    if redact and _is_sensitive(field_name):
+    if redact and _is_sensitive(field_name, patterns):
         return "[redacted]"
 
-    # Rule 2 & 3: Check serialisability and size.
+    # Rule 2: Recurse into nested structures so a sensitive key isn't hidden
+    # a level or two down inside a request body, config dict, etc.
+    if isinstance(value, dict):
+        value = _sanitise_dict(value, max_bytes, redact, patterns)
+    elif isinstance(value, list):
+        value = [
+            _sanitise_dict(item, max_bytes, redact, patterns)
+            if isinstance(item, dict) else item
+            for item in value
+        ]
+
+    # Rule 3 & 4: Check serialisability and size. Runs on the already-
+    # sanitised structure, so a "[redacted]" placeholder is tiny and never
+    # itself triggers the size limit.
     try:
         serialised = json.dumps(value, default=str)
         byte_count = len(serialised.encode("utf-8"))
@@ -348,9 +389,10 @@ def _sanitise_dict(
     data: Dict[str, Any],
     max_bytes: int,
     redact: bool,
+    patterns: "frozenset" = SENSITIVE_PATTERNS,
 ) -> Dict[str, Any]:
-    """Apply _safe_value to every key-value pair in a dict."""
-    return {k: _safe_value(k, v, max_bytes, redact) for k, v in data.items()}
+    """Apply _safe_value to every key-value pair in a dict, recursively."""
+    return {k: _safe_value(k, v, max_bytes, redact, patterns) for k, v in data.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +750,7 @@ class ActionTrace(TraceHelpersMixin):
                 result,
                 self._effective_budget.max_payload_bytes,
                 self._effective_config.redact_by_default,
+                self._effective_config.redaction_patterns,
             )
 
         # Build the event record. Extra kwargs (rows, database, tokens_in, etc.)
@@ -792,6 +835,7 @@ class ActionTrace(TraceHelpersMixin):
             data,
             self._effective_budget.max_payload_bytes,
             self._effective_config.redact_by_default,
+            self._effective_config.redaction_patterns,
         )
         self._inputs.update(sanitised)
 
@@ -814,6 +858,7 @@ class ActionTrace(TraceHelpersMixin):
             data,
             self._effective_budget.max_payload_bytes,
             self._effective_config.redact_by_default,
+            self._effective_config.redaction_patterns,
         )
         self._outputs.update(sanitised)
 

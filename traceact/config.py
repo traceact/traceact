@@ -22,6 +22,8 @@
 
 from typing import Any, List, Optional
 
+from traceact.redaction import REDACTION_PRESETS
+
 
 class TraceConfig:
     """
@@ -78,6 +80,30 @@ class TraceConfig:
         capture_outputs:
             When True (default), calls to trace.output() are recorded on the
             trace. When False, trace.output() is a no-op.
+
+        redaction_presets:
+            Named groups of extra field-name patterns to redact, layered on
+            top of the always-on baseline (password, token, secret, api_key,
+            auth, credential, credit_card, ssn, etc). Available presets:
+
+                "api_keys"          — jwt, bearer, signing_key, encryption_key,
+                                       hmac_key, master_key
+                "http"              — cookie, session_id, csrf_token,
+                                       x_forwarded_for, remote_addr, client_ip
+                "filesystem_paths"  — path, filepath, dir, workdir, cwd, and
+                                       similar fields that can leak a machine's
+                                       username or directory layout
+                "env_vars"          — env, environ, environment, dotenv
+
+            See traceact.redaction.REDACTION_PRESETS for the exact set of
+            patterns in each. Like every other field on TraceConfig, setting
+            this at the decorator/trace level REPLACES the package-level list
+            rather than merging with it.
+
+            Matching is by field name (substring, case-insensitive), the same
+            mechanism as the baseline set — not by scanning value content. A
+            secret stored under a field name not covered by any active preset
+            will not be caught.
     """
 
     def __init__(
@@ -88,13 +114,23 @@ class TraceConfig:
         redact_by_default: Optional[bool] = None,
         capture_inputs: Any = None,
         capture_outputs: Optional[bool] = None,
+        redaction_presets: Optional[List[str]] = None,
     ) -> None:
+        if redaction_presets is not None:
+            unknown = set(redaction_presets) - set(REDACTION_PRESETS)
+            if unknown:
+                raise ValueError(
+                    f"Unknown redaction preset(s): {sorted(unknown)}. "
+                    f"Available: {sorted(REDACTION_PRESETS)}"
+                )
+
         self.enabled = enabled
         self.sink_mode = sink_mode
         self.strict = strict
         self.redact_by_default = redact_by_default
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
+        self.redaction_presets = redaction_presets
 
 
 # ---------------------------------------------------------------------------

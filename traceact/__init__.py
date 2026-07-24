@@ -24,6 +24,9 @@
 #   JsonlSink     — writes traces to a .jsonl file.
 #
 #   ConsoleSink   — prints traces to stdout.
+#
+#   REDACTION_PRESETS — named groups of extra redaction patterns; pass their
+#                   names to TraceConfig(redaction_presets=[...]).
 
 __version__ = "0.2.1"
 
@@ -31,6 +34,7 @@ from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
 from traceact.trace import ActionTrace
 from traceact.decorators import traced_action
+from traceact.redaction import REDACTION_PRESETS
 from traceact.sinks import JsonlSink, ConsoleSink
 
 __all__ = [
@@ -43,4 +47,5 @@ __all__ = [
     "traced_action",
     "JsonlSink",
     "ConsoleSink",
+    "REDACTION_PRESETS",
 ]

@@ -573,11 +573,58 @@ configure(config=TraceConfig(capture_inputs=False))
 **What TraceAct does when capture is enabled:**
 1. Maps positional args to parameter names using `inspect.signature()`.
 2. Skips `self` and `cls`.
-3. Redacts arguments whose names match sensitive patterns: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `private_key`, `privatekey`, `access_key`, `accesskey`, `auth`, `credential`, `credentials`, `credit_card`, `card_number`, `cvv`, `ssn`.
-4. Truncates values larger than `max_payload_bytes`.
-5. Converts non-serialisable types to `[TypeName]`.
+3. Redacts arguments whose names match sensitive patterns: `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`, `apikey`, `private_key`, `privatekey`, `access_key`, `accesskey`, `auth`, `credential`, `credentials`, `credit_card`, `card_number`, `cvv`, `ssn`.
+4. Recurses into nested dicts and lists-of-dicts, so a sensitive field buried inside a request body or config object is also redacted — not just top-level keys (see below).
+5. Truncates values larger than `max_payload_bytes`.
+6. Converts non-serialisable types to `[TypeName]`.
 
 **`trace.input()` always works** regardless of the `capture_inputs` setting.
+
+### Redaction presets
+
+The pattern list above is always on. Layer additional field-name patterns on top of it with `redaction_presets`:
+
+```python
+from traceact import configure, TraceConfig, REDACTION_PRESETS
+
+print(sorted(REDACTION_PRESETS))
+# ['api_keys', 'env_vars', 'filesystem_paths', 'http']
+
+configure(config=TraceConfig(redaction_presets=["filesystem_paths", "env_vars"]))
+```
+
+| Preset | Extra patterns |
+|---|---|
+| `"api_keys"` | `jwt`, `bearer`, `signing_key`, `encryption_key`, `hmac_key`, `master_key` |
+| `"http"` | `cookie`, `set_cookie`, `session_id`, `csrf_token`, `x_forwarded_for`, `remote_addr`, `client_ip` |
+| `"filesystem_paths"` | `path`, `filepath`, `file_path`, `dir`, `directory`, `workdir`, `cwd`, `home_dir`, `homedir` |
+| `"env_vars"` | `env`, `environ`, `environment`, `envvar`, `env_var`, `dotenv` |
+
+An unknown preset name raises `ValueError` immediately at `TraceConfig(...)` construction, not later at trace time.
+
+Also settable per-decorator, same as any other `TraceConfig` field — but note that a decorator-level `redaction_presets` **replaces** the package-level list rather than adding to it, exactly like `capture_inputs` does:
+
+```python
+@traced_action(action="report.export", kind="app",
+               config=TraceConfig(redaction_presets=["api_keys"]))
+def export_report(...):
+    ...
+```
+
+**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism exactly (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name.
+
+**Nested redaction example:**
+
+```python
+trace.input({
+    "request": {
+        "headers": {"authorization": "Bearer abc123"},
+        "body": {"user_id": 42},
+    },
+})
+# stored as:
+# {"request": {"headers": {"authorization": "[redacted]"}, "body": {"user_id": 42}}}
+```
 
 ---
 

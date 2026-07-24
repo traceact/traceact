@@ -169,12 +169,14 @@ function renderLog() {
 function filteredTraces() {
   if (!state.search) return state.traces;
   const q = state.search.toLowerCase();
-  // Search across action, kind, status, and touched targets — the fields a
-  // developer is most likely to filter by ("only db", "anything with button").
+  // Search across action, kind, status, correlation id, and touched targets —
+  // the fields a developer is most likely to filter by ("only db", "anything
+  // with button", or a correlation id to see one job's traces end to end).
   return state.traces.filter((t) => {
     if ((t.action || "").toLowerCase().includes(q)) return true;
     if ((t.kind || "").toLowerCase().includes(q)) return true;
     if ((t.status || "").toLowerCase().includes(q)) return true;
+    if ((t.correlation_id || "").toLowerCase().includes(q)) return true;
     return (t.touches || []).some((x) =>
       (x.target || "").toLowerCase().includes(q)
     );
@@ -219,6 +221,12 @@ function inspectorSummary(t) {
   }
   if (t.root_trace_id && t.root_trace_id !== t.trace_id) {
     lines.push(`Root:     ${shortId(t.root_trace_id)}`);
+  }
+  if (t.correlation_id) {
+    // Shown in full (not shortId-truncated): the point of a correlation id is
+    // to copy/search it outside the app (search box, jq, grep), so a 6-char
+    // truncation would defeat the purpose.
+    lines.push(`Corr:     ${t.correlation_id}`);
   }
   lines.push(`Kind:     ${t.kind || ""}`);
   lines.push(`Duration: ${fmtDurLong(t.duration_ms)}`);
