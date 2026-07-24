@@ -41,14 +41,16 @@ traceact/
 9. [Touches](#touches)
 10. [Errors](#errors)
 11. [Parent and child traces](#parent-and-child-traces)
-12. [Input capture](#input-capture)
-13. [Sinks](#sinks)
-14. [Budget configuration](#budget-configuration)
-15. [TraceConfig fields](#traceconfig-fields)
-16. [Test isolation](#test-isolation)
-17. [Trace record schema](#trace-record-schema)
-18. [Viewing traces](#viewing-traces)
-19. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
+12. [Framework recipes](#framework-recipes)
+13. [Background jobs and correlation IDs](#background-jobs-and-correlation-ids)
+14. [Input capture](#input-capture)
+15. [Sinks](#sinks)
+16. [Budget configuration](#budget-configuration)
+17. [TraceConfig fields](#traceconfig-fields)
+18. [Test isolation](#test-isolation)
+19. [Trace record schema](#trace-record-schema)
+20. [Viewing traces](#viewing-traces)
+21. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
 
 ---
 
@@ -393,6 +395,150 @@ When `sample_rate < 1.0` and a trace is sampled out, a skip sentinel is pushed o
 
 ---
 
+## Framework recipes
+
+`@traced_action` and `ActionTrace` work on any callable — there's no framework integration to install. The only decision per framework is *where* to call `configure()` and *which* functions to wrap. These are patterns, not new API surface.
+
+### FastAPI
+
+Call `configure()` once, at import time or in a startup event, then wrap your route handlers or (more usefully) the service functions they call:
+
+```python
+# app/tracing.py — imported once, before routes are registered
+from traceact import configure, TraceConfig, JsonlSink
+
+configure(
+    config=TraceConfig(sink_mode="blocking"),
+    sinks=[JsonlSink("data/traces/traces.jsonl")],
+)
+```
+
+```python
+# app/routers/notes.py
+from fastapi import APIRouter
+from traceact import traced_action
+
+router = APIRouter()
+
+@traced_action(action="note.create", kind="app", actor="user")
+async def _create_note(title: str, body: str) -> dict:
+    ...
+    return {"note_id": "note_123"}
+
+@router.post("/notes")
+async def create_note(payload: dict):
+    return await _create_note(payload["title"], payload["body"])
+```
+
+Wrapping the inner service function (not the route handler directly) keeps the trace's `action` name stable even if you later rename the route or move it behind a different path. `correlation_id` is a good place to pass FastAPI's request ID if you have request-ID middleware:
+
+```python
+@traced_action(action="note.create", kind="app", correlation_id=request.state.request_id)
+```
+
+### Django
+
+Django's request/response cycle is a natural boundary for `correlation_id`, and views or service functions are the natural place for `@traced_action`:
+
+```python
+# myapp/apps.py — configure once when the app is ready
+from django.apps import AppConfig
+from traceact import configure, TraceConfig, JsonlSink
+
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self):
+        configure(
+            config=TraceConfig(sink_mode="blocking"),
+            sinks=[JsonlSink("data/traces/traces.jsonl")],
+        )
+```
+
+```python
+# myapp/services.py
+from traceact import traced_action
+
+@traced_action(action="order.process", kind="app", actor="user")
+def process_order(order_id: int) -> None:
+    ...
+```
+
+```python
+# myapp/views.py
+from django.http import JsonResponse
+from myapp.services import process_order
+
+def process_order_view(request, order_id):
+    process_order(order_id)
+    return JsonResponse({"status": "ok"})
+```
+
+If you want every request to carry a correlation ID automatically (so all traces from one request share it), set it from middleware using Python's `contextvars` and read it in the view before calling the traced function — TraceAct doesn't read Django's request object itself, so the ID has to be passed explicitly into `correlation_id=`.
+
+---
+
+## Background jobs and correlation IDs
+
+`correlation_id` links traces that belong to the same logical unit of work — a request, a job, a batch run — even when they happen across different function calls or processes. TraceAct doesn't generate or propagate it automatically across a queue boundary; the queue's message *is* the propagation mechanism, so you pass the ID through it like any other job argument.
+
+**Enqueuing** — generate (or reuse) a correlation ID before the job goes on the queue:
+
+```python
+import uuid
+from myqueue import enqueue
+
+def start_export(user_id: int):
+    correlation_id = f"corr_{uuid.uuid4().hex[:12]}"
+    enqueue("export_report", user_id=user_id, correlation_id=correlation_id)
+    return correlation_id  # e.g. return to the client so it can poll status
+```
+
+**Celery:**
+
+```python
+from celery import shared_task
+from traceact import traced_action
+
+@shared_task(name="export_report")
+@traced_action(action="report.export", kind="job", actor="worker")
+def export_report(user_id: int, correlation_id: str = None):
+    # correlation_id is picked up automatically by @traced_action's
+    # correlation_id kwarg only if passed through explicitly:
+    ...
+```
+
+`@traced_action`'s `correlation_id` parameter isn't populated from task kwargs automatically — pass it explicitly so the decorator sees it:
+
+```python
+@shared_task(name="export_report")
+def export_report(user_id: int, correlation_id: str = None):
+    _export_report(user_id, correlation_id=correlation_id)
+
+@traced_action(action="report.export", kind="job", actor="worker")
+def _export_report(user_id: int, correlation_id: str = None):
+    ...
+```
+
+**RQ:**
+
+```python
+from rq import Queue
+from traceact import traced_action
+
+@traced_action(action="report.export", kind="job", actor="worker")
+def export_report(user_id: int, correlation_id: str = None):
+    ...
+
+queue.enqueue(export_report, user_id=42, correlation_id="corr_abc123")
+```
+
+**Why this can't be automatic:** `contextvars.ContextVar` (which powers automatic parent/child linking within one process) does not cross a queue boundary — the worker that picks up the job runs in a different process with a fresh, empty context. The correlation ID has to travel as ordinary job data, the same way you'd pass any other argument the job needs.
+
+Traces from the enqueue side and the worker side won't share a `parent_trace_id` (they're different processes, so there's no shared ContextVar to link them), but they will share `correlation_id`. The viewer's search box doesn't currently filter by `correlation_id` (it matches on action, kind, status, and touched targets); to pull together one job's traces today, use "Copy JSON" on a trace to get its `correlation_id`, then `grep` or `jq` the JSONL file for it: `jq 'select(.correlation_id == "corr_abc123")' data/traces/traces.jsonl`.
+
+---
+
 ## Input capture
 
 By default, `@traced_action` doesn't capture function arguments.
@@ -447,6 +593,14 @@ from traceact import JsonlSink
 JsonlSink("data/traces/traces.jsonl")
 JsonlSink("/absolute/path/to/traces.jsonl")
 ```
+
+**Rotation (`max_bytes`):** by default the file grows without limit. Pass `max_bytes` to cap the active file's size — once the next write would exceed it, the current file is renamed to `<path>.<UTC timestamp>` and a fresh file starts at `path`:
+
+```python
+JsonlSink("data/traces/traces.jsonl", max_bytes=50_000_000)  # cap ~50 MB per file
+```
+
+Rotation renames rather than deletes, so history isn't lost — it's just no longer at `path`. Point the viewer at the containing **folder** rather than the single file to see the active file plus every rotated segment merged together: `traceact view data/traces/`. TraceAct doesn't currently delete old rotated segments on a schedule; clean them up yourself (e.g. a cron job or a retention script) if disk usage matters.
 
 ### ConsoleSink
 
@@ -704,6 +858,34 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
 
+### Health checks (`traceact doctor`)
+
+```bash
+traceact doctor [SOURCE]
+```
+
+Runs a handful of local checks and prints a pass/fail report — useful when tracing "isn't working" and you want to rule out setup problems before debugging your own code:
+
+- Python version meets the 3.9 minimum
+- the `~/.traceact` state directory exists and is writable (single-instance coordination and drag-drop imports depend on this)
+- whether a viewer is currently running (informational only — `doctor` doesn't require one)
+- if `SOURCE` is given: that the path exists and its lines parse as valid trace records
+
+```
+$ traceact doctor data/traces/traces.jsonl
+traceact doctor
+
+  ✓  Python 3.11 (OK, 3.9+ required)
+  ·  traceact 0.2.1
+  ✓  State directory (/Users/you/.traceact) is writable
+  ·  No viewer currently running (not required).
+  ✓  data/traces/traces.jsonl: 42/42 line(s) look like valid traces across 1 file(s)
+
+All checks passed.
+```
+
+Exits `0` if every check that can fail passed, `1` otherwise. A missing running viewer is never treated as a failure.
+
 ### Single-instance behaviour
 
 Running `traceact view` a second time — even for a different source — reuses a viewer that is already running rather than spawning a second server. The new source is added to the running viewer and a browser tab is opened on it. This avoids accumulating background processes across repeated launches during a dev session.
@@ -842,6 +1024,33 @@ async function openViewer() {
 ```
 
 Note: cross-origin `fetch` to the viewer will always be blocked by CORS unless the viewer adds an `Access-Control-Allow-Origin` header (it doesn't, by design). Use `mode: "no-cors"` only to warm up the connection; don't try to read the response. The backend-route approach above is cleaner because it doesn't depend on the client being on the same machine as the viewer.
+
+### Admin-safe viewer pattern
+
+**The viewer has no authentication of its own** — no login, no token, no session check. This is intentional: it's a local dev tool, and adding auth would mean TraceAct owning credential storage, which it explicitly doesn't want to do. That means access control is entirely your responsibility if more than one trusted person can reach the machine it runs on.
+
+**Rule of thumb:** never bind the viewer to a non-localhost host (`--host 0.0.0.0` or similar) unless you put your own authentication in front of it. Binding `127.0.0.1` (the default) means only processes on the same machine can reach it, which is the safe default for local development.
+
+If you want a "traceact viewer" button inside an internal team tool (like the FastAPI/Flask examples above), gate the *button and the route*, not the viewer itself:
+
+```python
+# The route that launches/connects to the viewer sits behind your app's
+# own admin-only auth dependency — the viewer itself stays on localhost
+# and is never exposed directly.
+from fastapi import Depends
+from traceact.viewer.instance import launch_or_connect
+
+@router.get("/api/launch-viewer")
+async def launch_viewer(user=Depends(require_admin)):
+    loop = asyncio.get_event_loop()
+    url = await loop.run_in_executor(None, launch_or_connect,
+                                     "data/traces/traces.jsonl")
+    return {"url": url}
+```
+
+Because `launch_or_connect` starts the viewer on `127.0.0.1` by default, the returned URL only works for someone on the same machine as the server process — appropriate for a local dev box, not for handing a link to a remote teammate. If your team needs to view traces from a shared/remote environment, don't punch the viewer through to the network; instead have each person run `traceact view` against a synced or shared copy of the trace file on their own machine, or wait for a future TraceAct release aimed at that use case (see Notes above — network-exposed viewing is explicitly out of scope for the current local-only design).
+
+**Trace data itself may be sensitive.** Traces can contain request bodies, resource identifiers, and (if `capture_inputs` is misconfigured) unredacted arguments. Treat a running viewer, and the JSONL files it reads, with the same access discipline as application logs.
 
 ---
 

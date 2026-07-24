@@ -97,6 +97,14 @@ The source modal (click the source name in the header) lets you:
 - **Drag and drop** a `.jsonl` file — saved as a static snapshot in `~/.traceact/imports/`
 - **Type a path** — collapsible fallback for pasting an absolute path
 
+### Health checks
+
+```bash
+traceact doctor [SOURCE]
+```
+
+Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. See [USAGE.md](USAGE.md#viewing-traces) for full output and exit-code details.
+
 ## Concepts
 
 | Concept | Meaning |

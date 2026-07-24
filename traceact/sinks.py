@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -117,13 +118,24 @@ class JsonlSink:
     Args:
         path: Path to the output file. The file is created if it does not exist
               and appended to if it does. Parent directories must exist.
+        max_bytes: If set, rotate the file once it would exceed this size. The
+              current file is renamed to "<path>.<UTC timestamp>" and a fresh
+              file is started at `path`. Default None: never rotate.
 
     Example:
         sinks=[JsonlSink("data/traces/traces.jsonl")]
+        sinks=[JsonlSink("data/traces/traces.jsonl", max_bytes=50_000_000)]
+
+    Rotation and the viewer:
+        A rotated-away file keeps its trace history but is no longer the file
+        at `path`, so a viewer tailing that single file won't show it. Point
+        the viewer at the containing folder instead (`traceact view data/traces/`)
+        to see the active file plus every rotated segment merged together.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, max_bytes: Optional[int] = None) -> None:
         self.path = path
+        self.max_bytes = max_bytes
         # Ensure the parent directory exists so writes don't fail silently.
         parent = os.path.dirname(os.path.abspath(path))
         os.makedirs(parent, exist_ok=True)
@@ -164,8 +176,35 @@ class JsonlSink:
         """
         line = json.dumps(record, default=str) + "\n"
         with self._lock:
+            self._rotate_if_needed(len(line.encode("utf-8")))
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(line)
+
+    def _rotate_if_needed(self, incoming_bytes: int) -> None:
+        """
+        Rename the current file out of the way if writing the next line would
+        push it past max_bytes, so a fresh file starts at `path`.
+
+        Called with `self._lock` already held. A rename (not a delete) so the
+        rotated segment's history is preserved on disk; only the *active* file
+        at `path` is capped in size.
+        """
+        if self.max_bytes is None:
+            return
+        try:
+            current_size = os.path.getsize(self.path)
+        except OSError:
+            return  # file doesn't exist yet — nothing to rotate.
+        if current_size + incoming_bytes <= self.max_bytes:
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        rotated_path = f"{self.path}.{timestamp}"
+        try:
+            os.rename(self.path, rotated_path)
+        except OSError:
+            # Best-effort: if the rename fails, keep appending to the same
+            # file rather than losing the record.
+            pass
 
 
 # ---------------------------------------------------------------------------
