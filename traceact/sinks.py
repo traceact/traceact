@@ -547,6 +547,444 @@ class HttpSink:
 
 
 # ---------------------------------------------------------------------------
+# OtlpSink
+# ---------------------------------------------------------------------------
+#
+# Exports finished TraceAct records to any OTLP-compatible collector via the
+# OTLP/HTTP+JSON transport. Zero dependencies — uses only stdlib urllib.
+#
+# Design decision (locked):
+#
+#   Three approaches were evaluated before this implementation:
+#
+#   1. Wrap the opentelemetry-sdk — rejected. Takes on OTel's release cycle and
+#      contradicts TraceAct's zero-dependency principle. Any version pinning or
+#      lag would be TraceAct's problem, not the user's.
+#
+#   2. OTLP/JSON via stdlib urllib — CHOSEN. Speaks the standard wire protocol
+#      directly. Works with any OTLP collector (Jaeger, Grafana Tempo, Honeycomb,
+#      Datadog agent, OpenTelemetry Collector) without additional SDKs. The user
+#      who already has OTel running just points OtlpSink at their existing
+#      collector endpoint — nothing else changes in their setup.
+#
+#   3. TraceAct becomes an OTel exporter/source — rejected. OTel is TraceAct's
+#      export target; TraceAct is the source of truth, not the other way around.
+#
+# Mapping principle — observable by choice, never lost:
+#
+#   Fields with a direct OTel span equivalent are mapped explicitly (trace ID,
+#   span ID, name, timestamps, parent span, status, steps → events, errors →
+#   exception events).
+#
+#   Fields without a direct OTel equivalent are emitted as `traceact.*` span
+#   attributes. This means:
+#     - New TraceAct fields added in future versions automatically appear in OTel
+#       output as attributes, even before an explicit mapping is decided.
+#     - Nothing is ever silently lost.
+#     - New explicit mappings are a one-line change inside OtlpSink; core and
+#       other sinks never change for this.
+#
+# ID format:
+#
+#   OTel requires 128-bit trace IDs (32 hex chars) and 64-bit span IDs (16 hex
+#   chars). TraceAct uses prefixed string IDs ("trc_abc123"). We hash each ID
+#   with hashlib.md5 to produce a stable, deterministic hex representation. The
+#   original TraceAct ID is always preserved as a "traceact.trace_id" span
+#   attribute so the two systems remain cross-referenceable.
+#
+# Observable failures:
+#
+#   Network errors, timeouts, and non-2xx responses from the collector are caught
+#   and counted in OtlpSink.failed — never silently swallowed. Wrap in AsyncSink
+#   for production so delivery latency stays off the application's hot path.
+
+import hashlib as _hashlib
+
+# ---------------------------------------------------------------------------
+# OTLP helper constants and functions (module-level, used only by OtlpSink)
+# ---------------------------------------------------------------------------
+
+# OTel SpanKind codes. INTERNAL is the safe default for anything that doesn't
+# map to a more specific category.
+_OTLP_KIND_INTERNAL  = 1
+_OTLP_KIND_SERVER    = 2
+_OTLP_KIND_CLIENT    = 3
+_OTLP_KIND_PRODUCER  = 4
+_OTLP_KIND_CONSUMER  = 5
+
+# Map TraceAct `kind` values to OTel SpanKind codes.
+# Client = outbound call (db query, model API, cache, external HTTP).
+# Producer = work enqueued (queue, email, export).
+# Consumer = work dequeued (background job).
+# Anything not listed defaults to INTERNAL.
+_KIND_TO_OTLP: Dict[str, int] = {
+    "db":      _OTLP_KIND_CLIENT,
+    "http":    _OTLP_KIND_CLIENT,    # treated as outbound by default
+    "cache":   _OTLP_KIND_CLIENT,
+    "model":   _OTLP_KIND_CLIENT,    # calling a model API
+    "auth":    _OTLP_KIND_CLIENT,
+    "payment": _OTLP_KIND_CLIENT,
+    "queue":   _OTLP_KIND_PRODUCER,
+    "email":   _OTLP_KIND_PRODUCER,
+    "export":  _OTLP_KIND_PRODUCER,
+    "job":     _OTLP_KIND_CONSUMER,
+}
+
+# Map TraceAct `status` to OTel StatusCode.
+# STATUS_CODE_UNSET=0, STATUS_CODE_OK=1, STATUS_CODE_ERROR=2.
+_STATUS_TO_OTLP: Dict[str, Dict[str, Any]] = {
+    "completed": {"code": 1},
+    "failed":    {"code": 2, "message": "trace failed"},
+    # pending / running / cancelled → UNSET (0); OTel has no partial-state codes
+}
+
+
+def _trace_id_hex(traceact_id: str) -> str:
+    """
+    Convert a TraceAct trace ID to a 32-char hex string (128-bit OTel trace ID).
+
+    We hash the TraceAct ID with MD5 so the output is always exactly 32 hex
+    chars and is deterministic: the same TraceAct ID always produces the same
+    OTel trace ID, making correlation reliable without any state.
+    """
+    return _hashlib.md5(traceact_id.encode()).hexdigest()  # 32 chars
+
+
+def _span_id_hex(traceact_id: str) -> str:
+    """
+    Convert a TraceAct trace ID to a 16-char hex string (64-bit OTel span ID).
+
+    Uses the first 16 chars of the MD5 hash — the low-order 64 bits. The same
+    ID used for the trace and span is intentional: each TraceAct record is both
+    a trace root and a span, so there's no separate span object to derive from.
+    """
+    return _hashlib.md5(traceact_id.encode()).hexdigest()[:16]  # 16 chars
+
+
+def _iso_to_nanos(ts: Optional[str]) -> int:
+    """
+    Convert an ISO 8601 timestamp to Unix nanoseconds (OTel's time unit).
+
+    Returns 0 for a missing or unparseable timestamp rather than raising, so
+    a bad timestamp in one trace record doesn't drop the whole export.
+
+    Python's datetime.fromisoformat handles "Z" only from 3.11+; we normalise
+    the "Z" suffix to "+00:00" first so this works on Python 3.9/3.10 too.
+    """
+    if not ts:
+        return 0
+    try:
+        from datetime import datetime, timezone
+        normalised = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalised)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return int((dt - epoch).total_seconds() * 1_000_000_000)
+    except (ValueError, OverflowError):
+        return 0
+
+
+def _otlp_attr(key: str, value: Any) -> Dict[str, Any]:
+    """
+    Encode a key-value pair as an OTLP AnyValue attribute dict.
+
+    OTel's attribute value is a typed union. We map Python types to their
+    OTel equivalents; everything else becomes a string so nothing is lost.
+    """
+    if isinstance(value, bool):
+        return {"key": key, "value": {"boolValue": value}}
+    if isinstance(value, int):
+        # OTel encodes int64 as a string in JSON to avoid precision loss.
+        return {"key": key, "value": {"intValue": str(value)}}
+    if isinstance(value, float):
+        return {"key": key, "value": {"doubleValue": value}}
+    return {"key": key, "value": {"stringValue": str(value)}}
+
+
+# Fields that are handled by explicit OTel mappings. Any top-level record field
+# NOT in this set is emitted as a "traceact.<field>" span attribute — the safety
+# net that ensures future TraceAct schema additions are never silently lost.
+_EXPLICITLY_MAPPED = frozenset({
+    "trace_id", "root_trace_id", "parent_trace_id", "correlation_id",
+    "action", "kind", "status", "started_at", "ended_at", "duration_ms",
+    "budget_hit", "actor", "project",
+    "inputs", "outputs", "touches",
+    "steps", "events", "errors",
+    "child_summaries", "meta",
+})
+
+
+def _to_otlp_span(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translate one TraceAct record into an OTLP span dict.
+
+    The span dict is the innermost element of the OTLP ExportTraceServiceRequest
+    JSON payload. OtlpSink wraps it in the required resourceSpans → scopeSpans
+    envelope before POSTing.
+
+    Mapping summary:
+      trace_id / parent_trace_id  → traceId / parentSpanId (MD5-hashed hex)
+      action                      → span name
+      kind                        → SpanKind (see _KIND_TO_OTLP)
+      started_at / ended_at       → startTimeUnixNano / endTimeUnixNano
+      status                      → OTel StatusCode (see _STATUS_TO_OTLP)
+      steps                       → OTel span events (name="step")
+      events                      → OTel span events (name=event.kind)
+      errors                      → OTel span events (name="exception")
+      inputs / outputs / touches  → span attributes (traceact.input.*, etc.)
+      everything else             → span attributes (traceact.*)
+    """
+    trace_id = record.get("trace_id") or ""
+    attrs: List[Dict[str, Any]] = []
+
+    # -- Always-present TraceAct identity attributes -------------------------
+    # Preserve original IDs so the two systems stay cross-referenceable even
+    # when the hashed OTel IDs are the only thing visible in the collector UI.
+    attrs.append(_otlp_attr("traceact.trace_id", trace_id))
+    if record.get("root_trace_id"):
+        attrs.append(_otlp_attr("traceact.root_trace_id", record["root_trace_id"]))
+    if record.get("correlation_id"):
+        attrs.append(_otlp_attr("traceact.correlation_id", record["correlation_id"]))
+    if record.get("actor"):
+        attrs.append(_otlp_attr("traceact.actor", record["actor"]))
+    if record.get("project"):
+        attrs.append(_otlp_attr("traceact.project", record["project"]))
+    if record.get("budget_hit"):
+        attrs.append(_otlp_attr("traceact.budget_hit", True))
+    if record.get("duration_ms") is not None:
+        attrs.append(_otlp_attr("traceact.duration_ms", record["duration_ms"]))
+
+    # -- Inputs → traceact.input.* attributes --------------------------------
+    for k, v in (record.get("inputs") or {}).items():
+        if not isinstance(v, (dict, list)):
+            attrs.append(_otlp_attr(f"traceact.input.{k}", v))
+
+    # -- Outputs → traceact.output.* attributes ------------------------------
+    for k, v in (record.get("outputs") or {}).items():
+        if not isinstance(v, (dict, list)):
+            attrs.append(_otlp_attr(f"traceact.output.{k}", v))
+
+    # -- Touches → traceact.touch.N.* attributes -----------------------------
+    for i, touch in enumerate(record.get("touches") or []):
+        attrs.append(_otlp_attr(f"traceact.touch.{i}.kind",   touch.get("kind", "")))
+        attrs.append(_otlp_attr(f"traceact.touch.{i}.target", touch.get("target", "")))
+
+    # -- Safety net: unmapped top-level scalar fields → traceact.* ----------
+    # Any scalar field added to the TraceAct schema in a future version
+    # automatically appears here as a span attribute, so it's never silently
+    # dropped while we decide whether it deserves an explicit mapping.
+    for k, v in record.items():
+        if k not in _EXPLICITLY_MAPPED and not isinstance(v, (dict, list)):
+            attrs.append(_otlp_attr(f"traceact.{k}", v))
+
+    # -- Steps → OTel span events (name="step") ------------------------------
+    otlp_events: List[Dict[str, Any]] = []
+    for step in (record.get("steps") or []):
+        otlp_events.append({
+            "name": "step",
+            "timeUnixNano": str(_iso_to_nanos(
+                step.get("recorded_at") or record.get("started_at")
+            )),
+            "attributes": [
+                _otlp_attr("traceact.step.label", step.get("label", "")),
+            ],
+        })
+
+    # -- TraceAct events → OTel span events ----------------------------------
+    for ev in (record.get("events") or []):
+        ev_attrs: List[Dict[str, Any]] = []
+        for k, v in ev.items():
+            # Skip already-captured structural fields; flatten scalars.
+            if k in ("event_id", "kind", "started_at", "parent_event_id"):
+                continue
+            if isinstance(v, dict):
+                # Flatten one level (e.g. result: {rows: 1} → traceact.event.result.rows)
+                for sub_k, sub_v in v.items():
+                    if not isinstance(sub_v, (dict, list)):
+                        ev_attrs.append(_otlp_attr(f"traceact.event.result.{sub_k}", sub_v))
+            elif not isinstance(v, list):
+                ev_attrs.append(_otlp_attr(f"traceact.event.{k}", v))
+        otlp_events.append({
+            "name": ev.get("kind") or "event",
+            "timeUnixNano": str(_iso_to_nanos(
+                ev.get("started_at") or record.get("started_at")
+            )),
+            "attributes": ev_attrs,
+        })
+
+    # -- Errors → OTel exception events (OTel semantic conventions) ----------
+    for err in (record.get("errors") or []):
+        otlp_events.append({
+            "name": "exception",
+            "timeUnixNano": str(_iso_to_nanos(record.get("started_at"))),
+            "attributes": [
+                _otlp_attr("exception.type",    err.get("type", "Error")),
+                _otlp_attr("exception.message", err.get("message", "")),
+            ],
+        })
+
+    # -- Assemble the span ---------------------------------------------------
+    span: Dict[str, Any] = {
+        "traceId":          _trace_id_hex(trace_id),
+        "spanId":           _span_id_hex(trace_id),
+        "name":             record.get("action") or "unknown",
+        "kind":             _KIND_TO_OTLP.get(record.get("kind") or "", _OTLP_KIND_INTERNAL),
+        "startTimeUnixNano": str(_iso_to_nanos(record.get("started_at"))),
+        "endTimeUnixNano":   str(_iso_to_nanos(
+            record.get("ended_at") or record.get("started_at")
+        )),
+        "attributes": attrs,
+        "events":     otlp_events,
+        "status":     _STATUS_TO_OTLP.get(record.get("status") or "", {"code": 0}),
+    }
+
+    parent = record.get("parent_trace_id")
+    if parent:
+        span["parentSpanId"] = _span_id_hex(parent)
+
+    return span
+
+
+def _get_traceact_version() -> str:
+    """Return the installed traceact version without a circular import."""
+    try:
+        from importlib.metadata import version
+        return version("traceact")
+    except Exception:
+        return "0.0.0"
+
+
+class OtlpSink:
+    """
+    Exports finished traces to any OTLP-compatible collector via HTTP/JSON.
+
+    Uses stdlib urllib — zero additional dependencies.
+
+    Point it at your collector's OTLP HTTP receiver (default port 4318):
+
+        from traceact import OtlpSink, AsyncSink, configure
+
+        configure(sinks=[AsyncSink([OtlpSink("http://localhost:4318")])])
+
+    Works with any OTLP-compatible backend: Jaeger, Grafana Tempo, Honeycomb,
+    Datadog agent, OpenTelemetry Collector, and others.
+
+    For SaaS collectors that require authentication, pass your API key in
+    headers:
+
+        OtlpSink(
+            "https://api.honeycomb.io",
+            headers={"x-honeycomb-team": "<your-api-key>"},
+        )
+
+    **Always wrap in AsyncSink for production.** Each write() makes a
+    synchronous HTTP request; without AsyncSink that latency hits every
+    traced function call.
+
+    Failed deliveries are counted in OtlpSink.failed — observable by choice,
+    never silently dropped:
+
+        if sink.failed > 0:
+            logger.warning("OtlpSink: %d trace deliveries failed", sink.failed)
+
+    Args:
+        endpoint:
+            Base URL of the OTLP HTTP receiver, without a path. Traces are
+            posted to ``{endpoint}/v1/traces``.
+
+        headers:
+            Optional dict of extra request headers (API keys, auth tokens).
+
+        timeout:
+            Per-request timeout in seconds. Default: 5.0.
+
+        resource_attributes:
+            Optional dict of OTel resource attributes added to every exported
+            span (e.g. {"service.name": "my-app", "deployment.env": "prod"}).
+            If omitted, ``service.name`` defaults to ``"traceact"``.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: float = 5.0,
+        resource_attributes: Optional[Dict[str, str]] = None,
+    ) -> None:
+        # Normalise: strip trailing slash so we can always append /v1/traces.
+        self.endpoint = endpoint.rstrip("/")
+        self.headers = headers or {}
+        self.timeout = timeout
+
+        # Build the OTel resource attribute list once — it's the same for
+        # every span this sink exports.
+        res_attrs = {"service.name": "traceact"}
+        res_attrs.update(resource_attributes or {})
+        self._resource = {
+            "attributes": [_otlp_attr(k, v) for k, v in res_attrs.items()]
+        }
+
+        # Count of write() calls that resulted in a delivery failure.
+        # Observable by choice — never silently hidden.
+        self._failed = 0
+        self._failed_lock = threading.Lock()
+
+    @property
+    def failed(self) -> int:
+        """Number of trace deliveries that have failed so far."""
+        with self._failed_lock:
+            return self._failed
+
+    def write(self, record: Dict[str, Any]) -> None:
+        """
+        Export one trace record to the collector.
+
+        Translates the TraceAct record to an OTLP span, wraps it in the
+        ExportTraceServiceRequest envelope, and POSTs to {endpoint}/v1/traces.
+
+        Delivery failures are caught, counted in self.failed, and never
+        propagated — a failing collector must not crash the application or
+        kill an AsyncSink worker.
+        """
+        try:
+            span = _to_otlp_span(record)
+            payload = {
+                "resourceSpans": [{
+                    "resource": self._resource,
+                    "scopeSpans": [{
+                        "scope": {
+                            "name":    "traceact",
+                            "version": _get_traceact_version(),
+                        },
+                        "spans": [span],
+                    }],
+                }]
+            }
+            body = json.dumps(payload, default=str).encode("utf-8")
+            url = f"{self.endpoint}/v1/traces"
+            req = _urllib_request.Request(url, data=body, method="POST")
+            req.add_header("Content-Type",   "application/json")
+            req.add_header("Content-Length", str(len(body)))
+            for name, value in self.headers.items():
+                req.add_header(name, value)
+
+            with _urllib_request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.status
+            if status < 200 or status >= 300:
+                self._record_failure()
+        except Exception:
+            # Catches network errors, timeouts, JSON serialisation failures,
+            # and anything unexpected. All counted; none re-raised.
+            self._record_failure()
+
+    def _record_failure(self) -> None:
+        """Increment the failure counter under its lock."""
+        with self._failed_lock:
+            self._failed += 1
+
+
+# ---------------------------------------------------------------------------
 # AsyncSink
 # ---------------------------------------------------------------------------
 #

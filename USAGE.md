@@ -744,6 +744,176 @@ AsyncSink([
 
 Both inner sinks receive every record on the background thread. A failing inner sink is caught and skipped so one bad sink can't kill the worker or lose records destined for the others.
 
+### SqliteSink
+
+Writes finished traces to a local SQLite database using stdlib `sqlite3` — no extra dependencies. Common fields (`action`, `kind`, `status`, `started_at`, `correlation_id`, etc.) are stored as indexed scalar columns for fast filtering; the full trace record is also stored as JSON in a `record` column so no detail is ever lost. The schema is created automatically on first write.
+
+```python
+from traceact import SqliteSink, configure
+
+configure(sinks=[SqliteSink("data/traces.db")])
+```
+
+**Custom table name:**
+
+```python
+SqliteSink("data/traces.db", table="my_traces")
+```
+
+**Querying traces directly from the database:**
+
+```python
+import sqlite3, json
+
+conn = sqlite3.connect("data/traces.db")
+
+# All failures in the last hour:
+rows = conn.execute("""
+    SELECT action, duration_ms, record
+    FROM traces
+    WHERE status = 'failed'
+      AND started_at > datetime('now', '-1 hour')
+    ORDER BY started_at DESC
+""").fetchall()
+
+for action, ms, raw in rows:
+    record = json.loads(raw)
+    print(f"{action}  {ms}ms  errors={record.get('errors')}")
+```
+
+**Concurrent writes:** SQLite is opened in WAL mode so reads and writes can proceed concurrently. For high-concurrency workloads, wrap in `AsyncSink` so write latency stays off the application's hot path:
+
+```python
+from traceact import AsyncSink, SqliteSink, configure
+
+configure(sinks=[AsyncSink([SqliteSink("data/traces.db")])])
+```
+
+**Write errors** are printed to stderr and never propagated to the caller — a database hiccup doesn't interrupt the traced function.
+
+### HttpSink
+
+POSTs each finished trace as a JSON body to an HTTP or HTTPS endpoint. Uses stdlib `urllib` only — zero extra dependencies.
+
+```python
+from traceact import HttpSink, AsyncSink, configure
+
+configure(sinks=[
+    AsyncSink([HttpSink("https://collector.example.com/traces")])
+])
+```
+
+**Always wrap in `AsyncSink` for production use.** Each write makes a synchronous HTTP request; without `AsyncSink` that latency hits every traced function call on the return path.
+
+**Custom headers** (API keys, auth tokens):
+
+```python
+HttpSink(
+    "https://collector.example.com/traces",
+    headers={"Authorization": "Bearer <your-token>"},
+)
+```
+
+**Custom timeout** (default: 5 seconds):
+
+```python
+HttpSink("https://collector.example.com/traces", timeout=2.0)
+```
+
+**Observable failures:** network errors, timeouts, and non-2xx responses are counted in `HttpSink.failed` — never raised, never silently swallowed. Check it in a health endpoint or periodic log:
+
+```python
+sink = HttpSink("https://collector.example.com/traces")
+configure(sinks=[AsyncSink([sink])])
+
+# in a health check or periodic log:
+if sink.failed > 0:
+    logger.warning("HttpSink: %d trace deliveries failed", sink.failed)
+```
+
+### OtlpSink
+
+Exports finished traces to any OTLP-compatible collector — Jaeger, Grafana Tempo, Honeycomb, Datadog agent, the OpenTelemetry Collector, and others. Uses OTLP/HTTP+JSON over stdlib `urllib`. Zero extra dependencies; no `opentelemetry-sdk` required.
+
+```python
+from traceact import OtlpSink, AsyncSink, configure
+
+configure(sinks=[
+    AsyncSink([OtlpSink("http://localhost:4318")])
+])
+```
+
+Point `endpoint` at your collector's OTLP HTTP receiver base URL (the standard port is 4318). TraceAct appends `/v1/traces` automatically.
+
+**Always wrap in `AsyncSink` for production use** — each write makes a synchronous HTTP request.
+
+**SaaS collectors (Honeycomb, Datadog, etc.):**
+
+```python
+# Honeycomb
+OtlpSink(
+    "https://api.honeycomb.io",
+    headers={"x-honeycomb-team": "<your-api-key>"},
+)
+
+# Datadog (OTLP agent receiver, default port 4318)
+OtlpSink("http://localhost:4318")
+
+# Grafana Cloud
+OtlpSink(
+    "https://<your-instance>.grafana.net/otlp",
+    headers={"Authorization": "Basic <base64-encoded-credentials>"},
+)
+```
+
+**Service name and resource attributes:**
+
+```python
+OtlpSink(
+    "http://localhost:4318",
+    resource_attributes={
+        "service.name":    "orders-api",
+        "deployment.env":  "production",
+        "service.version": "2.1.0",
+    },
+)
+```
+
+These appear as resource-level attributes on every span exported by this sink. `service.name` defaults to `"traceact"` if you don't set it.
+
+**How TraceAct records map to OTel spans:**
+
+| TraceAct field | OTel span field |
+|---|---|
+| `action` | Span name |
+| `kind` (`db`, `http`, `cache`, `model`, `auth`, `payment`) | SpanKind CLIENT |
+| `kind` (`queue`, `email`, `export`) | SpanKind PRODUCER |
+| `kind` (`job`) | SpanKind CONSUMER |
+| Everything else | SpanKind INTERNAL |
+| `started_at` / `ended_at` | `startTimeUnixNano` / `endTimeUnixNano` |
+| `status = "completed"` | StatusCode OK |
+| `status = "failed"` | StatusCode ERROR |
+| `parent_trace_id` | `parentSpanId` |
+| `steps` | Span events (`name="step"`) |
+| `errors` | Span events (`name="exception"`) |
+| `inputs.*` | Span attributes `traceact.input.*` |
+| `outputs.*` | Span attributes `traceact.output.*` |
+| `touches` | Span attributes `traceact.touch.N.kind/target` |
+| `trace_id`, `correlation_id`, `actor`, etc. | Span attributes `traceact.*` |
+| Any unlisted scalar field | Span attribute `traceact.<field>` |
+
+TraceAct IDs (`trc_...`) are hashed with MD5 to produce the 128-bit trace ID and 64-bit span ID that OTel requires. The original TraceAct IDs are always preserved as `traceact.trace_id` (and `traceact.root_trace_id`, `traceact.correlation_id`) span attributes so you can cross-reference them.
+
+**Observable failures:** network errors, timeouts, and non-2xx responses from the collector are counted in `OtlpSink.failed`:
+
+```python
+sink = OtlpSink("http://localhost:4318")
+configure(sinks=[AsyncSink([sink])])
+
+if sink.failed > 0:
+    logger.warning("OtlpSink: %d trace deliveries failed", sink.failed)
+```
+
 ### Fallback
 
 If no sinks are configured when a trace finishes, TraceAct falls back to `ConsoleSink()` so traces aren't silently dropped.

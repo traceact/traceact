@@ -38,6 +38,13 @@
 #                   urllib). Failed deliveries counted in HttpSink.failed.
 #                   Always wrap in AsyncSink for production use.
 #
+#   OtlpSink      — exports traces to any OTLP-compatible collector via
+#                   HTTP/JSON (stdlib urllib, zero extra dependencies).
+#                   Works with Jaeger, Grafana Tempo, Honeycomb, Datadog
+#                   agent, OTel Collector, and others. Failed deliveries
+#                   counted in OtlpSink.failed. Always wrap in AsyncSink
+#                   for production use.
+#
 #   REDACTION_PRESETS — named groups of extra redaction patterns; pass their
 #                   names to TraceConfig(redaction_presets=[...]).
 #
@@ -53,7 +60,7 @@ from traceact.budget import TraceBudget
 from traceact.trace import ActionTrace
 from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
-from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink
+from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink, OtlpSink
 from traceact.log import TraceLog
 
 __all__ = [
@@ -69,6 +76,7 @@ __all__ = [
     "AsyncSink",
     "SqliteSink",
     "HttpSink",
+    "OtlpSink",
     "REDACTION_PRESETS",
     "TraceLog",
 ]
