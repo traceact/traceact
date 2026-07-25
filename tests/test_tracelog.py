@@ -7,6 +7,7 @@
 
 import json
 import os
+import unittest.mock as mock
 import pytest
 
 from traceact import TraceLog
@@ -316,3 +317,150 @@ class TestRenderTable:
         assert "2 traces shown" in out
         # "a" is the oldest trace (08:00); only the two newest (b, c) should appear
         assert "08:00:00" not in out
+
+
+# ---------------------------------------------------------------------------
+# TraceLog.view() — URL building + browser interaction
+# ---------------------------------------------------------------------------
+#
+# We never actually launch a viewer in tests. We patch launch_or_connect to
+# return a fixed base URL, and webbrowser.open to capture what URL was opened.
+
+_FAKE_BASE = "http://127.0.0.1:8765/"
+
+class TestView:
+    def _patch_launch(self):
+        return mock.patch(
+            "traceact.viewer.instance.launch_or_connect",
+            return_value=_FAKE_BASE,
+        )
+
+    def _patch_browser(self):
+        return mock.patch("webbrowser.open")
+
+    # -- URL structure -------------------------------------------------------
+
+    def test_no_filters_returns_base_url(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f))
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert url == "http://127.0.0.1:8765/"
+
+    def test_single_exact_filter(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="failed")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_status=failed" in url
+
+    def test_operator_filter_uses_double_underscore(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(action__contains="note")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_action__contains=note" in url
+
+    def test_multiple_filters_all_present(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="failed").filter(kind="db")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_status=failed" in url
+        assert "pf_kind=db" in url
+
+    def test_startswith_operator(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(action__startswith="order")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_action__startswith=order" in url
+
+    def test_endswith_operator(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(action__endswith=".create")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_action__endswith=.create" in url
+
+    def test_re_operator(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(action__re="^order")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "pf_action__re=" in url
+
+    def test_url_starts_with_base(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="completed")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert url.startswith("http://127.0.0.1:8765/")
+
+    def test_query_string_separator(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="failed")
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            url = log.view(open_browser=False)
+        assert "?" in url
+
+    # -- Source path passed to viewer ----------------------------------------
+
+    def test_source_path_passed_to_launch_or_connect(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f))
+        with mock.patch(
+            "traceact.viewer.instance.launch_or_connect",
+            return_value=_FAKE_BASE,
+        ) as mock_launch, mock.patch("webbrowser.open"):
+            log.view(open_browser=False)
+        mock_launch.assert_called_once_with(source=str(f))
+
+    # -- open_browser flag ---------------------------------------------------
+
+    def test_open_browser_false_does_not_open_browser(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f))
+        with self._patch_launch(), mock.patch("webbrowser.open") as mock_browser:
+            log.view(open_browser=False)
+        mock_browser.assert_not_called()
+
+    def test_open_browser_true_opens_browser(self, tmp_path):
+        import threading
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="failed")
+        opened = []
+        def fake_timer(delay, fn):
+            fn()   # fire immediately in test
+            t = mock.MagicMock()
+            t.start = lambda: None
+            return t
+        with self._patch_launch(), \
+             mock.patch("webbrowser.open", side_effect=lambda u: opened.append(u)), \
+             mock.patch("threading.Timer", side_effect=fake_timer):
+            log.view(open_browser=True)
+        assert len(opened) == 1
+        assert "pf_status=failed" in opened[0]
+
+    # -- Immutability — view() does not mutate the TraceLog ------------------
+
+    def test_view_does_not_mutate_specs(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        log = TraceLog(str(f)).filter(status="failed")
+        before = list(log._specs)
+        with self._patch_launch(), mock.patch("webbrowser.open"):
+            log.view(open_browser=False)
+        assert log._specs == before

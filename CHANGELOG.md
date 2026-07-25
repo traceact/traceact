@@ -19,7 +19,7 @@ All notable changes to TraceAct are documented here.
   - `filter(**kwargs)` adds predicates (AND logic); returns a new `TraceLog` — the original is unchanged.
   - Supported filter operators: exact equality (`status="failed"`), `__contains`, `__startswith`, `__endswith`, `__re` (regex search). All string operators are case-insensitive.
   - Terminal methods: `.all()` (oldest-first), `.last(n)` (n most recent), `.first(n)` (n oldest), `.count()`, `.render_table(n=None)` (stdout table for quick inspection).
-  - **`TraceLog.view()`** — opens the human viewer (launching or reusing an existing instance) pre-filtered to match the `TraceLog`'s current filters. The viewer shows the active filters as dismissable badges above the trace list; the human can remove any badge to widen the view, and the search box still works on top. The viewer's normal behaviour when opened without `TraceLog.view()` is completely unchanged.
+  - **`TraceLog.view()`** — opens the human viewer (launching or reusing an existing instance) pre-filtered to match the `TraceLog`'s current filters via `?pf_*` URL params. The viewer shows the active filters as dismissable badges above the trace list; the human can remove any badge to widen the view, and the search box still works on top. Pass `open_browser=False` to get the URL without opening a browser. The viewer's normal behaviour when opened without `TraceLog.view()` is completely unchanged.
   - No dependencies beyond the standard library (except `view()`, which uses the bundled viewer).
   - Exported from the top-level `traceact` package.
 

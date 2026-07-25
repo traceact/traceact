@@ -244,7 +244,8 @@ class TraceLog:
             key = f"pf_{field}" if op == "eq" else f"pf_{field}__{op}"
             params.append((key, str(value)))
 
-        url = base_url.rstrip("/") + ("?" + urlencode(params) if params else "")
+        base = base_url if base_url.endswith("/") else base_url + "/"
+        url = base + ("?" + urlencode(params) if params else "")
 
         if open_browser:
             import threading

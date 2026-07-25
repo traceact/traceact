@@ -52,12 +52,13 @@ tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 13. [Background jobs and correlation IDs](#background-jobs-and-correlation-ids)
 14. [Input capture](#input-capture)
 15. [Sinks](#sinks)
-16. [Budget configuration](#budget-configuration)
-17. [TraceConfig fields](#traceconfig-fields)
-18. [Test isolation](#test-isolation)
-19. [Trace record schema](#trace-record-schema)
-20. [Viewing traces](#viewing-traces)
-21. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
+16. [TraceLog](#tracelog)
+17. [Budget configuration](#budget-configuration)
+18. [TraceConfig fields](#traceconfig-fields)
+19. [Test isolation](#test-isolation)
+20. [Trace record schema](#trace-record-schema)
+21. [Viewing traces](#viewing-traces)
+22. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
 
 ---
 
@@ -917,6 +918,109 @@ if sink.failed > 0:
 ### Fallback
 
 If no sinks are configured when a trace finishes, TraceAct falls back to `ConsoleSink()` so traces aren't silently dropped.
+
+---
+
+## TraceLog
+
+`TraceLog` is the programmatic query interface for TraceAct JSONL files. Use it when code — an AI agent, a test suite, or a background script — needs to read trace data without opening a browser.
+
+```python
+from traceact import TraceLog
+
+log = TraceLog("data/traces/traces.jsonl")   # file or folder
+```
+
+A folder source behaves the same as in the viewer: all `.jsonl` files inside it are merged on every read.
+
+### Filtering
+
+`filter()` returns a **new** `TraceLog` — the original is never mutated.
+
+```python
+failures  = log.filter(status="failed")
+db_traces = log.filter(kind="db")
+
+# AND logic: both conditions must hold
+recent_db_failures = log.filter(kind="db", status="failed")
+
+# Chained calls are equivalent
+same_thing = log.filter(kind="db").filter(status="failed")
+```
+
+**Supported operators:**
+
+| Syntax | Behaviour |
+|---|---|
+| `field=value` | Exact equality (case-sensitive) |
+| `field__contains=value` | Case-insensitive substring |
+| `field__startswith=value` | Case-insensitive prefix |
+| `field__endswith=value` | Case-insensitive suffix |
+| `field__re=pattern` | `re.search` — partial regex match |
+
+```python
+log.filter(action__contains="order")          # any action with "order"
+log.filter(action__startswith="payment")      # actions starting with "payment"
+log.filter(action__re=r"^order\.(create|update)$")
+log.filter(correlation_id="job_abc123")       # find one background job's traces
+```
+
+### Terminal methods
+
+```python
+log.filter(status="failed").all()       # List[dict], oldest-first
+log.filter(status="failed").last(10)    # 10 most recent
+log.filter(status="failed").first(10)   # 10 oldest
+log.filter(status="failed").count()     # int
+
+log.filter(status="failed").render_table()      # pretty-print to stdout
+log.filter(status="failed").render_table(n=25)  # cap rows shown
+```
+
+Each terminal call re-reads the JSONL file(s) — there is no caching, so you always get the current state of a live source.
+
+### Using TraceLog in tests
+
+```python
+import pytest
+from traceact import TraceLog, configure, reset_config, JsonlSink
+
+def test_checkout_records_payment_touch(tmp_path):
+    sink_path = tmp_path / "traces.jsonl"
+    configure(sinks=[JsonlSink(str(sink_path))])
+
+    # run the function under test
+    checkout(user_id="u_42", amount=99.00)
+
+    log = TraceLog(str(sink_path))
+    traces = log.filter(action="checkout").all()
+
+    assert len(traces) == 1
+    touch_kinds = [t["kind"] for t in traces[0].get("touches", [])]
+    assert "payment" in touch_kinds
+
+    reset_config()
+```
+
+### TraceLog.view() — shared lens
+
+`view()` opens the viewer pre-filtered to match the `TraceLog`'s current filters. The viewer shows each active filter as a dismissable badge above the trace list — a human can remove any badge to widen the view, and the search box still works on top.
+
+```python
+# Open the viewer showing only failed traces
+TraceLog("data/traces/traces.jsonl").filter(status="failed").view()
+
+# Open with multiple filters
+TraceLog("data/traces/traces.jsonl") \
+    .filter(kind="db", status="failed") \
+    .view()
+
+# Get the URL without opening a browser (useful in CI or a script)
+url = log.filter(status="failed").view(open_browser=False)
+print(f"Open the viewer at: {url}")
+```
+
+The viewer is launched (or an existing instance is reused) and pointed at the same source file or folder that the `TraceLog` reads from. The viewer's normal behaviour when opened without `view()` is completely unchanged.
 
 ---
 
