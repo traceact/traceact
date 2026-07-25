@@ -113,7 +113,15 @@ Checks Python version, that `~/.traceact` is writable, whether a viewer is alrea
 | `Step` | A human-readable timeline marker within a trace |
 | `Event` | A structured operation: db, http, file, model, job, etc. |
 | `Touch` | A resource involved in the trace (auto-derived from events) |
-| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`) |
+| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`, `AsyncSink`) |
+
+### Design principle: observable by choice, never forced blind
+
+TraceAct exists to give you X-ray vision for your code. That means nothing TraceAct does itself should take that vision away.
+
+Wherever TraceAct might skip, drop, or truncate data — a trace sampled out by `sample_rate`, events truncated by a budget limit, records dropped by `AsyncSink` under backpressure — there is always an observable signal. The `budget_hit` flag marks truncated traces. The `AsyncSink.dropped` counter counts every dropped record. Sampling decisions are made before a trace object is created, so nothing is half-recorded.
+
+The design choice is always: **silent by default, observable by choice**. You decide whether to log, alert on, or ignore those signals. TraceAct never makes that decision for you.
 
 ## Wiring into a web app
 

@@ -246,15 +246,311 @@ class ConsoleSink:
 
 
 # ---------------------------------------------------------------------------
+# SqliteSink
+# ---------------------------------------------------------------------------
+#
+# Writes each finished trace to a local SQLite database using the sqlite3
+# module from the standard library — no third-party dependencies.
+#
+# Schema design:
+# The full trace record is stored as JSON in the `record` column so no trace
+# data is lost. A set of scalar columns (action, kind, status, started_at, …)
+# are extracted alongside it and indexed so common queries ("all failed db
+# traces", "all traces for correlation id X") run without scanning JSON text.
+#
+# Thread safety:
+# A single sqlite3 connection is kept open per SqliteSink. SQLite connections
+# are not safe to share across threads by default; we pass check_same_thread=
+# False and guard every write with a threading.Lock. For high-concurrency
+# workloads, wrap this sink in AsyncSink — that serialises all writes to a
+# single background thread, making the lock a no-op.
+#
+# WAL mode (Write-Ahead Logging):
+# Enabled on every database we open. WAL allows concurrent readers without
+# blocking the writer and significantly reduces write latency under load.
+
+
+import sqlite3 as _sqlite3
+
+
+class SqliteSink:
+    """
+    Writes finished traces to a SQLite database, one row per trace.
+
+    The database and table are created automatically on first write if they
+    do not already exist. Existing databases opened by a previous process are
+    safe to reuse: the CREATE TABLE and CREATE INDEX statements use
+    IF NOT EXISTS, so they are no-ops when the schema is already in place.
+
+    The full trace record is stored as JSON so no detail is lost. Common
+    fields (action, kind, status, started_at, etc.) are also stored as
+    indexed scalar columns for fast filtering without scanning JSON.
+
+    Usage::
+
+        from traceact import SqliteSink, configure
+
+        configure(sinks=[SqliteSink("data/traces/traces.db")])
+
+    For high-concurrency workloads, wrap in AsyncSink so database writes
+    happen off the application's hot path::
+
+        configure(sinks=[AsyncSink([SqliteSink("data/traces/traces.db")])])
+
+    Args:
+        path:
+            Path to the SQLite database file. Created (including any missing
+            parent directories) on first write. Use ":memory:" for an
+            in-memory database (useful in tests).
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        # The connection is opened lazily on first write so that simply
+        # constructing a SqliteSink has no side effects.
+        self._conn: Optional["_sqlite3.Connection"] = None
+        self._lock = threading.Lock()
+
+    # -- public API ----------------------------------------------------------
+
+    def write(self, record: Dict[str, Any]) -> None:
+        """
+        Insert a finished trace record into the database.
+
+        On the first call, opens (or creates) the database, enables WAL mode,
+        and creates the table and indexes if they don't already exist.
+
+        Errors are swallowed — a failing sink must never crash the application
+        or the surrounding AsyncSink worker. The exception is logged to stderr
+        so the failure is observable without being fatal.
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO traces (
+                        trace_id, root_trace_id, parent_trace_id,
+                        correlation_id, action, kind, status,
+                        started_at, ended_at, duration_ms, budget_hit,
+                        record
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.get("trace_id"),
+                        record.get("root_trace_id"),
+                        record.get("parent_trace_id"),
+                        record.get("correlation_id"),
+                        record.get("action"),
+                        record.get("kind"),
+                        record.get("status"),
+                        record.get("started_at"),
+                        record.get("ended_at"),
+                        record.get("duration_ms"),
+                        int(bool(record.get("budget_hit", False))),
+                        json.dumps(record, default=str),
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                # Write errors must never propagate up to the application or
+                # kill an AsyncSink worker thread. Print to stderr so the
+                # failure is observable without being fatal.
+                import sys
+                print(f"traceact SqliteSink write error: {exc}", file=sys.stderr)
+
+    def close(self) -> None:
+        """Close the database connection. Safe to call when never written to."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+    # -- internals -----------------------------------------------------------
+
+    def _get_connection(self) -> "_sqlite3.Connection":
+        """
+        Return the open connection, creating it (and the schema) on first call.
+
+        Must be called with self._lock held.
+        """
+        if self._conn is not None:
+            return self._conn
+
+        # Create parent directories if needed (same behaviour as JsonlSink).
+        if self.path != ":memory:":
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+
+        conn = _sqlite3.connect(self.path, check_same_thread=False)
+
+        # WAL mode: readers don't block the writer and writes don't block
+        # readers. This is the recommended mode for any application that reads
+        # and writes concurrently.
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # Create the schema. IF NOT EXISTS means this is safe to run against
+        # a database that already has the table (e.g. from a previous run).
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS traces (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id        TEXT NOT NULL UNIQUE,
+                root_trace_id   TEXT,
+                parent_trace_id TEXT,
+                correlation_id  TEXT,
+                action          TEXT NOT NULL,
+                kind            TEXT,
+                status          TEXT,
+                started_at      TEXT,
+                ended_at        TEXT,
+                duration_ms     REAL,
+                budget_hit      INTEGER DEFAULT 0,
+                record          TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_traces_action
+                ON traces (action);
+            CREATE INDEX IF NOT EXISTS idx_traces_status
+                ON traces (status);
+            CREATE INDEX IF NOT EXISTS idx_traces_kind
+                ON traces (kind);
+            CREATE INDEX IF NOT EXISTS idx_traces_started_at
+                ON traces (started_at);
+            CREATE INDEX IF NOT EXISTS idx_traces_root
+                ON traces (root_trace_id);
+            CREATE INDEX IF NOT EXISTS idx_traces_correlation
+                ON traces (correlation_id);
+        """)
+        conn.commit()
+
+        self._conn = conn
+        return conn
+
+
+# ---------------------------------------------------------------------------
+# HttpSink
+# ---------------------------------------------------------------------------
+#
+# POSTs each finished trace as a JSON body to an HTTP/HTTPS endpoint.
+# Uses urllib.request from the standard library — no requests dependency.
+#
+# Observable failures:
+# Network errors, timeouts, and non-2xx responses are caught so the sink
+# never crashes the application. Every failure increments HttpSink.failed
+# so the caller can observe and act on errors rather than being silently
+# misled into thinking all traces reached the collector.
+#
+# Hot-path note:
+# Each write() makes a synchronous HTTP request. For any real endpoint
+# this adds meaningful latency to the traced function's return path. Always
+# wrap HttpSink in AsyncSink for production use:
+#
+#     AsyncSink([HttpSink("https://collector.example.com/traces")])
+#
+# The bundled USAGE.md documents this pattern.
+
+
+import urllib.request as _urllib_request
+import urllib.error as _urllib_error
+
+
+class HttpSink:
+    """
+    POSTs finished traces as JSON to an HTTP or HTTPS endpoint.
+
+    Uses urllib from the standard library — no third-party dependencies.
+
+    **Always wrap in AsyncSink for production use.** Each write() makes a
+    synchronous HTTP request; without AsyncSink that latency hits your
+    application's hot path on every traced function call.
+
+    Failed writes (connection error, timeout, non-2xx response) are counted
+    in HttpSink.failed so they are observable without being fatal. Check it
+    in a health endpoint or periodic log::
+
+        sink = HttpSink("https://collector.example.com/traces")
+        configure(sinks=[AsyncSink([sink])])
+
+        # later, in a health route:
+        if sink.failed > 0:
+            logger.warning("HttpSink: %d trace deliveries failed", sink.failed)
+
+    Args:
+        url:
+            The endpoint URL. Must accept POST requests with a JSON body
+            (Content-Type: application/json). Receives one trace record per
+            request.
+
+        headers:
+            Optional dict of additional request headers. Use this for
+            authentication (e.g. {"Authorization": "Bearer <token>",
+            "X-Api-Key": "<key>"}).
+
+        timeout:
+            Request timeout in seconds. Requests that exceed this are
+            abandoned and counted as failures. Default: 5.0.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: float = 5.0,
+    ) -> None:
+        self.url = url
+        self.headers = headers or {}
+        self.timeout = timeout
+
+        # Count of write() calls that failed due to a network error, timeout,
+        # or non-2xx response. Observable by choice, never silently hidden.
+        self._failed = 0
+        self._failed_lock = threading.Lock()
+
+    @property
+    def failed(self) -> int:
+        """Number of trace deliveries that have failed so far."""
+        with self._failed_lock:
+            return self._failed
+
+    def write(self, record: Dict[str, Any]) -> None:
+        """
+        POST a single trace record to the configured URL.
+
+        The body is a UTF-8 encoded JSON object. All errors (network failure,
+        timeout, non-2xx status) are caught; failures increment self.failed
+        rather than propagating to the caller or crashing an AsyncSink worker.
+        """
+        body = json.dumps(record, default=str).encode("utf-8")
+        req = _urllib_request.Request(
+            self.url,
+            data=body,
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Length", str(len(body)))
+        for name, value in self.headers.items():
+            req.add_header(name, value)
+
+        try:
+            with _urllib_request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.status
+            if status < 200 or status >= 300:
+                self._record_failure()
+        except (_urllib_error.URLError, OSError, Exception):
+            # Catches: connection refused, DNS failure, timeout, SSL errors,
+            # and any unexpected exception from urlopen. All are treated as
+            # delivery failures — they're counted, not re-raised.
+            self._record_failure()
+
+    def _record_failure(self) -> None:
+        """Increment the failure counter under its lock."""
+        with self._failed_lock:
+            self._failed += 1
+
+
+# ---------------------------------------------------------------------------
 # AsyncSink
 # ---------------------------------------------------------------------------
 #
-# STATUS: Designed and implemented in the v0.2 line, scheduled to become an
-# activated, publicly-exported sink in v0.3 alongside the network (push) sinks.
-# It is intentionally NOT exported from traceact/__init__.py yet, and the
-# backpressure defaults below are provisional pending the v0.3 review. It is
-# written and commented in full now so the design is settled and the v0.3 work
-# is a matter of wiring and testing, not fresh design.
+# STATUS: Publicly exported from traceact/__init__.py as of v0.4.
 #
 # Why an async sink exists:
 # Every other sink writes on the caller's thread. When a traced action finishes,
@@ -363,9 +659,15 @@ class AsyncSink:
         # without limit under overload and eventually exhaust memory.
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue)
 
-        # Number of records dropped due to the on_full policy. Exposed so that
-        # loss under overload is visible rather than silent. Guarded by its own
-        # tiny lock because it is written by app threads and read by callers.
+        # Number of records dropped due to the on_full policy.
+        #
+        # TraceAct's core principle is "X-ray vision for your code" — a silent
+        # drop is blindness. This counter makes every dropped record observable:
+        # callers can check it, log it, or expose it in a health endpoint. The
+        # developer chooses whether to act on drops; the library never hides them.
+        #
+        # Guarded by its own lock because it is written by app threads (or the
+        # worker for drop_oldest) and read by callers concurrently.
         self._dropped = 0
         self._dropped_lock = threading.Lock()
 

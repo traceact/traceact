@@ -23,6 +23,10 @@ const state = {
   selected: null,         // the trace object shown in the inspector
   activeTab: "log",       // "log" | "map"
   search: "",
+  // Pre-filters seeded from URL params when the viewer is opened via
+  // TraceLog.view(). Empty in normal usage — no effect on viewer behaviour.
+  // Shape: { field: { op: "eq"|"contains"|..., value: string } }
+  preFilters: {},
   stream: null,           // the EventSource, or null
   replayPaused: false,    // whether the map replay is paused
   settings: loadSettings(),
@@ -39,6 +43,7 @@ function init() {
   wireModal();
   wireReplayControls();
   wireDoctor();
+  initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
 
   refreshSources().then(() => {
     // If a source was seeded on the command line, stream the first one.
@@ -168,12 +173,35 @@ function renderLog() {
 }
 
 function filteredTraces() {
-  if (!state.search) return state.traces;
+  // Step 1: apply pre-filters seeded from TraceLog.view() URL params (if any).
+  // Pre-filters use AND logic across all active fields. When state.preFilters
+  // is empty (the normal case) this is a no-op and returns state.traces unchanged.
+  let traces = state.traces;
+  const pfEntries = Object.entries(state.preFilters);
+  if (pfEntries.length > 0) {
+    traces = traces.filter((t) =>
+      pfEntries.every(([field, { op, value }]) => {
+        const raw = t[field];
+        if (raw == null) return false;
+        const s = String(raw).toLowerCase();
+        const v = String(value).toLowerCase();
+        if (op === "eq") return s === v;
+        if (op === "contains") return s.includes(v);
+        if (op === "startswith") return s.startsWith(v);
+        if (op === "endswith") return s.endsWith(v);
+        return false; // unknown operators treated as no-match
+      })
+    );
+  }
+
+  // Step 2: apply the search box on top of pre-filtered results.
+  // Existing single-string search behaviour is completely unchanged.
+  if (!state.search) return traces;
   const q = state.search.toLowerCase();
   // Search across action, kind, status, correlation id, and touched targets —
   // the fields a developer is most likely to filter by ("only db", "anything
   // with button", or a correlation id to see one job's traces end to end).
-  return state.traces.filter((t) => {
+  return traces.filter((t) => {
     if ((t.action || "").toLowerCase().includes(q)) return true;
     if ((t.kind || "").toLowerCase().includes(q)) return true;
     if ((t.status || "").toLowerCase().includes(q)) return true;
@@ -613,6 +641,76 @@ function setTab(tab) {
   document.getElementById("view-map").hidden = tab !== "map";
   renderInspector();
   if (tab === "map") renderMap();
+}
+
+/* ---- Pre-filters (TraceLog.view() integration) ----------------------- */
+
+// initPreFilters — reads ?pf_* URL params placed there by TraceLog.view() and
+// populates state.preFilters. Called once at startup. When the viewer is opened
+// normally (no pf_ params) this is a complete no-op: state.preFilters stays {},
+// the bar stays hidden, and filteredTraces() takes the fast path.
+function initPreFilters() {
+  const params = new URLSearchParams(window.location.search);
+  const pf = {};
+  for (const [key, value] of params.entries()) {
+    if (!key.startsWith("pf_")) continue;
+    const spec = key.slice(3); // strip the "pf_" prefix
+    if (spec.includes("__")) {
+      const idx = spec.indexOf("__");
+      const field = spec.slice(0, idx);
+      const op    = spec.slice(idx + 2);
+      pf[field] = { op, value };
+    } else {
+      pf[spec] = { op: "eq", value };
+    }
+  }
+  state.preFilters = pf;
+  renderPreFilterBar();
+}
+
+// renderPreFilterBar — draws one dismissable badge per active pre-filter.
+// Shows the bar when there are pre-filters; hides it when there are none.
+function renderPreFilterBar() {
+  const bar = document.getElementById("pre-filter-bar");
+  const entries = Object.entries(state.preFilters);
+  if (entries.length === 0) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = entries
+    .map(([field, { op, value }]) => {
+      const label = op === "eq"
+        ? `${field}: ${value}`
+        : `${field} ${op} "${value}"`;
+      return `<span class="pf-badge">
+        ${label}
+        <button class="pf-badge-dismiss" onclick="dismissPreFilter('${field}')"
+                title="Remove filter">×</button>
+      </span>`;
+    })
+    .join("");
+}
+
+// dismissPreFilter — removes one pre-filter, updates the URL (so a refresh
+// doesn't re-apply it), and re-renders the log with the remaining filters.
+function dismissPreFilter(field) {
+  delete state.preFilters[field];
+
+  // Remove the corresponding pf_ param(s) from the URL without a page reload.
+  const params = new URLSearchParams(window.location.search);
+  // Delete both the exact-match form (pf_field) and any operator form (pf_field__op).
+  for (const key of [...params.keys()]) {
+    if (key === `pf_${field}` || key.startsWith(`pf_${field}__`)) {
+      params.delete(key);
+    }
+  }
+  const qs = params.toString();
+  history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+
+  renderPreFilterBar();
+  renderLog();
 }
 
 function wireSearch() {

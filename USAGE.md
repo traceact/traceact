@@ -14,7 +14,7 @@ traceact/
   context.py      — ContextVar for active trace, SKIP sentinel
   redaction.py    — SENSITIVE_PATTERNS baseline + REDACTION_PRESETS registry
   sinks.py        — JsonlSink (thread-safe, rotation via max_bytes), ConsoleSink,
-                    AsyncSink (not yet public)
+                    AsyncSink (background-thread wrapper; public as of v0.4)
   helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
   ids.py          — ID generation (trc_, evt_, stp_, corr_ prefixes)
 
@@ -687,6 +687,62 @@ configure(sinks=[
     ConsoleSink(pretty=True),
 ])
 ```
+
+### AsyncSink
+
+Wraps any other sink(s) and performs all writes on a background thread, keeping I/O completely off the application's hot path. The traced function drops the record into an in-memory queue and returns immediately; a single worker thread drains the queue at its own pace.
+
+```python
+from traceact import AsyncSink, JsonlSink
+
+configure(sinks=[
+    AsyncSink([JsonlSink("data/traces/traces.jsonl")])
+])
+```
+
+**When to use it:** any time the inner sink is slow or remote — an HTTP collector, a database, or a high-latency filesystem. For local files on fast hardware, the overhead of `JsonlSink` alone is rarely worth wrapping.
+
+**Backpressure — and why drops are always observable:**
+
+If your application produces traces faster than the worker can write them, the queue fills up. TraceAct will never crash or block your app to protect a trace record — but it will never drop records *silently* either. Every record dropped under a backpressure policy is counted in `AsyncSink.dropped`. Check it, log it, or expose it in a health endpoint:
+
+```python
+sink = AsyncSink([JsonlSink("traces.jsonl")])
+configure(sinks=[sink])
+
+# later, in a health check or periodic log:
+if sink.dropped > 0:
+    logger.warning("AsyncSink dropped %d trace records (queue full)", sink.dropped)
+```
+
+The whole point of TraceAct is X-ray vision for your code. A silent drop is blindness. The `dropped` counter means you can *choose* to ignore dropped records — but the choice is yours, not the library's.
+
+Three policies for when the queue is full:
+
+| Policy | Behaviour | Use when |
+|---|---|---|
+| `"drop_newest"` (default) | Discard the incoming record; count it | Older in-flight records are more diagnostically useful |
+| `"drop_oldest"` | Evict the oldest queued record to make room | Recent traces matter more than historical ones |
+| `"block"` | Stall the calling thread until there is space | Zero loss is required and brief latency is acceptable |
+
+```python
+AsyncSink([JsonlSink("traces.jsonl")], max_queue=50_000, on_full="drop_oldest")
+```
+
+**Graceful shutdown:** `AsyncSink` registers an `atexit` hook on first write. When the process exits normally, the worker flushes all buffered records before stopping — short-lived scripts don't need to call `close()` explicitly, but you can call it yourself at a known shutdown point to flush sooner.
+
+**Fork safety:** `os.fork()` doesn't copy background threads into child processes. `AsyncSink` registers a post-fork handler to reset the worker in the child so it starts fresh on the next write.
+
+**Wrapping multiple sinks:**
+
+```python
+AsyncSink([
+    JsonlSink("data/traces/traces.jsonl"),
+    ConsoleSink(pretty=False),
+])
+```
+
+Both inner sinks receive every record on the background thread. A failing inner sink is caught and skipped so one bad sink can't kill the worker or lose records destined for the others.
 
 ### Fallback
 

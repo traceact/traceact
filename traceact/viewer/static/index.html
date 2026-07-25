@@ -49,6 +49,9 @@
         <div class="canvas">
           <!-- Log tab -->
           <div id="view-log">
+            <!-- Pre-filter bar: only visible when TraceLog.view() seeded URL params.
+                 Hidden by default so the normal viewer experience is unchanged. -->
+            <div id="pre-filter-bar" hidden></div>
             <input class="search" id="search" placeholder="Search traces" />
             <table class="log-table">
               <thead>

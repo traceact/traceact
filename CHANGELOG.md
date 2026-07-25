@@ -2,6 +2,25 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **`SqliteSink`** — writes finished traces to a local SQLite database using stdlib `sqlite3`. The full trace record is stored as JSON in a `record` column so no detail is lost; common fields (`action`, `kind`, `status`, `started_at`, `correlation_id`, etc.) are also stored as indexed scalar columns for fast filtering. Schema is created automatically on first write; `INSERT OR REPLACE` handles duplicate `trace_id`s cleanly. WAL mode is enabled for concurrent read/write performance. Write errors print to stderr (observable, not silent) and never propagate to the caller. For high-concurrency workloads, wrap in `AsyncSink`.
+
+- **`HttpSink`** — POSTs each finished trace as a JSON body to an HTTP/HTTPS endpoint, using stdlib `urllib` only. Failed deliveries (network error, timeout, non-2xx response) are counted in `HttpSink.failed` — observable by choice, never silently lost. Always wrap in `AsyncSink` for production use so HTTP latency stays off the application's hot path.
+
+- **`AsyncSink`** — exported from the top-level `traceact` package. Wraps any other sink(s) and performs all writes on a background thread, so the traced application never blocks on sink I/O. Designed for use with slow or remote inner sinks (e.g. a future `HttpSink`). Features: lazy worker start (no thread until first write), three backpressure policies (`drop_newest` / `drop_oldest` / `block`), a `.dropped` counter so loss under overload is observable rather than silent, graceful `close()` with `atexit` registration, and fork safety via `os.register_at_fork`. The implementation was already complete since v0.2; this release wires it into the public API and adds a full test suite.
+
+- **`TraceLog`** — programmatic query interface for TraceAct JSONL files. Solves the "code needs to read traces" problem: an AI agent, test suite, or script can query trace files without opening a browser or parsing JSONL manually.
+  - Accepts the same source types as the viewer: a `.jsonl` file, or a folder of them.
+  - `filter(**kwargs)` adds predicates (AND logic); returns a new `TraceLog` — the original is unchanged.
+  - Supported filter operators: exact equality (`status="failed"`), `__contains`, `__startswith`, `__endswith`, `__re` (regex search). All string operators are case-insensitive.
+  - Terminal methods: `.all()` (oldest-first), `.last(n)` (n most recent), `.first(n)` (n oldest), `.count()`, `.render_table(n=None)` (stdout table for quick inspection).
+  - **`TraceLog.view()`** — opens the human viewer (launching or reusing an existing instance) pre-filtered to match the `TraceLog`'s current filters. The viewer shows the active filters as dismissable badges above the trace list; the human can remove any badge to widen the view, and the search box still works on top. The viewer's normal behaviour when opened without `TraceLog.view()` is completely unchanged.
+  - No dependencies beyond the standard library (except `view()`, which uses the bundled viewer).
+  - Exported from the top-level `traceact` package.
+
 ## [0.3.0] — 2026-07-25
 
 ### Fixed

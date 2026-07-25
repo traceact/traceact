@@ -25,8 +25,26 @@
 #
 #   ConsoleSink   — prints traces to stdout.
 #
+#   AsyncSink     — wraps any other sink(s) and performs all writes on a
+#                   background thread, keeping I/O off the application's hot
+#                   path. Handles backpressure, graceful shutdown, and fork
+#                   safety. Use when the inner sink is slow or remote.
+#
+#   SqliteSink    — writes traces to a local SQLite database (stdlib sqlite3).
+#                   Scalar columns for fast queries; full JSON in a record
+#                   column so no detail is lost. WAL mode enabled by default.
+#
+#   HttpSink      — POSTs each trace as JSON to an HTTP/HTTPS endpoint (stdlib
+#                   urllib). Failed deliveries counted in HttpSink.failed.
+#                   Always wrap in AsyncSink for production use.
+#
 #   REDACTION_PRESETS — named groups of extra redaction patterns; pass their
 #                   names to TraceConfig(redaction_presets=[...]).
+#
+#   TraceLog      — programmatic query interface for JSONL trace files.
+#                   Use instead of the viewer when code (an agent, test, or
+#                   script) needs to read traces. TraceLog("traces.jsonl")
+#                   .filter(status="failed").last(10) returns plain dicts.
 
 __version__ = "0.3.0"
 
@@ -35,7 +53,8 @@ from traceact.budget import TraceBudget
 from traceact.trace import ActionTrace
 from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
-from traceact.sinks import JsonlSink, ConsoleSink
+from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink
+from traceact.log import TraceLog
 
 __all__ = [
     "__version__",
@@ -47,5 +66,9 @@ __all__ = [
     "traced_action",
     "JsonlSink",
     "ConsoleSink",
+    "AsyncSink",
+    "SqliteSink",
+    "HttpSink",
     "REDACTION_PRESETS",
+    "TraceLog",
 ]
