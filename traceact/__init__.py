@@ -53,7 +53,7 @@
 #                   script) needs to read traces. TraceLog("traces.jsonl")
 #                   .filter(status="failed").last(10) returns plain dicts.
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget

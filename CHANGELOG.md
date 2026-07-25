@@ -2,7 +2,7 @@
 
 All notable changes to TraceAct are documented here.
 
-## [Unreleased]
+## [0.4.0] — 2026-07-25
 
 ### Added
 
