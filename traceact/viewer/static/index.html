@@ -16,12 +16,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TraceAct</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='0' y='0' width='32' height='32' rx='7' fill='%230d1114'/%3E%3Crect x='0.75' y='0.75' width='30.5' height='30.5' rx='6.25' fill='none' stroke='%23353F44' stroke-width='1.5'/%3E%3Ccircle cx='8.5' cy='17.5' r='1.8' fill='%230d1114' stroke='%234ade80' stroke-width='1.6'/%3E%3Cpath d='M8.5 17.5 L13.5 22.5 L24 10.5' fill='none' stroke='%234ade80' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24' cy='10.5' r='2.1' fill='%234ade80'/%3E%3C/svg%3E" />
 </head>
 <body>
   <div id="app">
     <!-- Left navigation -->
     <aside class="sidebar">
-      <div class="brand"><span class="mark">✓</span> TraceAct</div>
+      <div class="brand">
+        <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+          <rect x="0" y="0" width="32" height="32" rx="7" fill="#0d1114"/>
+          <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="6.25" fill="none" stroke="#353F44" stroke-width="1.5"/>
+          <circle cx="8.5" cy="17.5" r="1.8" fill="#0d1114" stroke="#4ade80" stroke-width="1.6"/>
+          <path d="M8.5 17.5 L13.5 22.5 L24 10.5" fill="none" stroke="#4ade80" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="24" cy="10.5" r="2.1" fill="#4ade80"/>
+        </svg>
+        TraceAct
+      </div>
       <nav class="nav">
         <button data-nav="traces" class="active">Traces</button>
         <button data-nav="settings">Settings</button>
