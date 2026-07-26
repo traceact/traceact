@@ -35,6 +35,22 @@ dependencies = []
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    # Test-order randomisation. Activates automatically once installed — no
+    # flag needed. Kept on deliberately: an order-dependent failure means
+    # shared/global state is leaking between tests, which is a real bug.
+    # Never pin --randomly-seed in CI to "stabilise" a run; that hides exactly
+    # the failure mode this plugin exists to catch.
+    "pytest-randomly>=3.15",
+    # Real framework objects for propagation tests (extract_trace_id,
+    # TraceActMiddleware, TraceActASGIMiddleware). These are test-only —
+    # traceact itself has zero runtime dependencies. Testing against a
+    # hand-built dict instead of an actual Flask/Django/Starlette request
+    # object was exactly the gap that let a header-parsing bug through
+    # 43 green tests; these are here so that never happens again.
+    "flask>=3.0",
+    "starlette>=0.36",
+    "django>=4.2",
+    "requests>=2.31",
 ]
 
 [project.urls]

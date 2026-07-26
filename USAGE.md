@@ -1470,22 +1470,30 @@ Because `launch_or_connect` starts the viewer on `127.0.0.1` by default, the ret
 
 ## Distributed propagation
 
-When a traced action in Service A calls Service B, TraceAct can link the two
-services' traces together by passing a `traceact-trace-id` header. Any traces
-Service B starts while handling that request will have their `correlation_id`
-set to Service A's `trace_id` automatically.
+When a traced action in Service A calls Service B, TraceAct links the two
+services' traces together with two separate HTTP headers — separate because
+they answer separate questions:
 
-### Outbound: stamp the header
+| Header | Sets on the receiving trace | Answers |
+|---|---|---|
+| `traceact-trace-id` | `upstream_trace_id` | "which trace in another service triggered me?" (causal lineage) |
+| `traceact-correlation-id` | `correlation_id` | "which wider workflow do I belong to?" (business grouping, passed through untouched) |
 
-Use `inject_headers()` to add the propagation header to any outbound request.
-It reads the currently active trace from context and returns a new dict — the
-original is never modified.
+Keeping them separate matters: a trace can have an upstream parent in one
+service *and* belong to a correlation group that was assigned several hops
+earlier. Folding one into the other silently discards whichever one loses.
+
+### Outbound: stamp both headers
+
+`inject_headers()` reads the active trace and stamps its `trace_id` (always)
+and its `correlation_id` (if set) onto an outbound headers dict. It never
+mutates the dict you pass in.
 
 ```python
 import requests
 from traceact import inject_headers
 
-with ActionTrace.start(action="order.submit") as trace:
+with ActionTrace.start(action="order.submit", correlation_id="corr_wf_9f2a") as trace:
     headers = inject_headers({"Content-Type": "application/json"})
     requests.post("https://payments.internal/charge", json=payload, headers=headers)
 ```
@@ -1493,20 +1501,30 @@ with ActionTrace.start(action="order.submit") as trace:
 Works the same with `httpx`, `urllib`, or any other HTTP client — `inject_headers`
 just returns a plain dict.
 
-### Inbound: extract the header (manual)
+### Inbound: extract the headers (manual)
 
-Use the `propagate` context manager when you want explicit control over
-propagation, or when your framework isn't covered by the automatic middleware:
+Use the `propagate` context manager when you want explicit control, or when
+your framework isn't covered by the automatic middleware. Pass the framework's
+header object **directly** — `request.headers` works as-is on Flask, Django,
+FastAPI, and Starlette, and so does a plain dict in any casing:
 
 ```python
 from traceact import propagate, ActionTrace
 
 def handle_charge(request):
-    with propagate(dict(request.headers)):
+    with propagate(request.headers):
         with ActionTrace.start(action="charge.process") as trace:
-            # trace.correlation_id == Service A's trace_id
+            # trace.upstream_trace_id == Service A's trace_id
+            # trace.correlation_id   == whatever correlation Service A had
             ...
 ```
+
+HTTP header names are case-insensitive and every framework reconstructs them
+differently (Flask/Werkzeug and Django hand back `Traceact-Trace-Id`,
+Title-Case; ASGI delivers raw lowercase bytes). `propagate()` and
+`extract_trace_id()`/`extract_correlation_id()` normalise all of that
+internally — pass the header object however your framework gives it to you,
+including `dict(request.headers)` if you already have that.
 
 ### Inbound: automatic via middleware (Flask / Django)
 
@@ -1521,9 +1539,11 @@ from django.core.wsgi import get_wsgi_application
 application = TraceActMiddleware(get_wsgi_application())
 ```
 
-The middleware reads `traceact-trace-id` from the WSGI environ and sets
-`correlation_id` on every trace started during that request. If the header is
-absent, the middleware is transparent.
+Reads both headers from the WSGI environ and applies them to every trace
+started during that request — including traces started while a streamed
+response body is generated (the context is held until the response is fully
+closed, not just until the view function returns). If neither header is
+present, the middleware is fully transparent.
 
 ### Inbound: automatic via middleware (FastAPI / Starlette)
 
@@ -1541,20 +1561,23 @@ Or wrap manually:
 app = TraceActASGIMiddleware(app)
 ```
 
-### How the correlation chain looks in the viewer
+### How the chain looks in the viewer and TraceLog
 
-Both services write their own trace records. The link is the shared
-`correlation_id` value — `TraceLog.filter(correlation_id=...)` queries it, and
-the viewer inspector shows it in the trace summary card.
+Both services write their own trace records. Query by whichever link answers
+your question — `upstream_trace_id` for "what did this specific call trigger",
+`correlation_id` for "show me the whole workflow":
 
 ```python
 from traceact import TraceLog
 
-upstream_id = "trc_abc123"
 log = TraceLog("traces.jsonl")
-related = log.filter(correlation_id=upstream_id).all()
-log.filter(correlation_id=upstream_id).view()
+log.filter(upstream_trace_id="trc_abc123").all()   # traces this call triggered
+log.filter(correlation_id="corr_wf_9f2a").all()    # the entire workflow
+log.filter(correlation_id="corr_wf_9f2a").view()   # same, in the browser viewer
 ```
+
+The inspector's summary card shows both when present, each in full (not
+shortened) so they can be copied and searched against another service's logs.
 
 ### `ai_prompts` redaction preset
 
@@ -1586,12 +1609,18 @@ Combine with other presets:
 TraceConfig(redaction_presets=["ai_prompts", "api_keys"])
 ```
 
-### Reference: header name
+### Reference: headers
 
-| Direction | Header | Value |
+| Header | Outbound (inject) | Inbound (extract) |
 |---|---|---|
-| Outbound (inject) | `traceact-trace-id` | Active `ActionTrace.trace_id` |
-| Inbound (extract) | `traceact-trace-id` | Sets `correlation_id` on new traces |
+| `traceact-trace-id` | Active `ActionTrace.trace_id` | Sets `upstream_trace_id` |
+| `traceact-correlation-id` | Active `ActionTrace.correlation_id`, if set | Sets `correlation_id` |
+
+Accepted header collection types on the inbound side: any object with
+`.items()` (dict in any casing, Werkzeug/Django/Starlette header objects,
+`requests.CaseInsensitiveDict`), a list of `(name, value)` pairs, or raw ASGI
+`[(b"name", b"value")]` byte pairs. Matching is case-insensitive regardless of
+which form you pass.
 
 WSGI: the header arrives as `HTTP_TRACEACT_TRACE_ID` in the environ.
 ASGI: the header arrives as bytes in `scope["headers"]`.

@@ -331,15 +331,16 @@ class SqliteSink:
                     """
                     INSERT OR REPLACE INTO traces (
                         trace_id, root_trace_id, parent_trace_id,
-                        correlation_id, action, kind, status,
+                        upstream_trace_id, correlation_id, action, kind, status,
                         started_at, ended_at, duration_ms, budget_hit,
                         record
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.get("trace_id"),
                         record.get("root_trace_id"),
                         record.get("parent_trace_id"),
+                        record.get("upstream_trace_id"),
                         record.get("correlation_id"),
                         record.get("action"),
                         record.get("kind"),
@@ -392,20 +393,31 @@ class SqliteSink:
         # a database that already has the table (e.g. from a previous run).
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS traces (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                trace_id        TEXT NOT NULL UNIQUE,
-                root_trace_id   TEXT,
-                parent_trace_id TEXT,
-                correlation_id  TEXT,
-                action          TEXT NOT NULL,
-                kind            TEXT,
-                status          TEXT,
-                started_at      TEXT,
-                ended_at        TEXT,
-                duration_ms     REAL,
-                budget_hit      INTEGER DEFAULT 0,
-                record          TEXT NOT NULL
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id          TEXT NOT NULL UNIQUE,
+                root_trace_id     TEXT,
+                parent_trace_id   TEXT,
+                upstream_trace_id TEXT,
+                correlation_id    TEXT,
+                action            TEXT NOT NULL,
+                kind              TEXT,
+                status            TEXT,
+                started_at        TEXT,
+                ended_at          TEXT,
+                duration_ms       REAL,
+                budget_hit        INTEGER DEFAULT 0,
+                record            TEXT NOT NULL
             );
+        """)
+
+        # Migrate databases created by an older TraceAct before running the
+        # index statements. CREATE TABLE IF NOT EXISTS is a no-op against an
+        # existing table, so a column added in a later version would otherwise
+        # be missing and every INSERT would fail. Adding it here means an
+        # existing traces.db keeps working across an upgrade with no manual step.
+        self._add_missing_columns(conn)
+
+        conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_traces_action
                 ON traces (action);
             CREATE INDEX IF NOT EXISTS idx_traces_status
@@ -418,11 +430,31 @@ class SqliteSink:
                 ON traces (root_trace_id);
             CREATE INDEX IF NOT EXISTS idx_traces_correlation
                 ON traces (correlation_id);
+            CREATE INDEX IF NOT EXISTS idx_traces_upstream
+                ON traces (upstream_trace_id);
         """)
         conn.commit()
 
         self._conn = conn
         return conn
+
+    @staticmethod
+    def _add_missing_columns(conn: "_sqlite3.Connection") -> None:
+        """
+        Add any scalar columns this version expects that an older database
+        doesn't have yet.
+
+        SQLite's ALTER TABLE ADD COLUMN is cheap (metadata-only) and existing
+        rows get NULL for the new column, which is exactly right — those traces
+        genuinely had no value for it.
+        """
+        expected = {
+            "upstream_trace_id": "TEXT",
+        }
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(traces)")}
+        for column, decl in expected.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE traces ADD COLUMN {column} {decl}")
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +738,8 @@ def _otlp_attr(key: str, value: Any) -> Dict[str, Any]:
 # NOT in this set is emitted as a "traceact.<field>" span attribute — the safety
 # net that ensures future TraceAct schema additions are never silently lost.
 _EXPLICITLY_MAPPED = frozenset({
-    "trace_id", "root_trace_id", "parent_trace_id", "correlation_id",
+    "trace_id", "root_trace_id", "parent_trace_id", "upstream_trace_id",
+    "correlation_id",
     "action", "kind", "status", "started_at", "ended_at", "duration_ms",
     "budget_hit", "actor", "project",
     "inputs", "outputs", "touches",
@@ -746,6 +779,14 @@ def _to_otlp_span(record: Dict[str, Any]) -> Dict[str, Any]:
         attrs.append(_otlp_attr("traceact.root_trace_id", record["root_trace_id"]))
     if record.get("correlation_id"):
         attrs.append(_otlp_attr("traceact.correlation_id", record["correlation_id"]))
+    # Cross-service lineage. Emitted as an attribute rather than an OTel
+    # parentSpanId because the upstream span belongs to a different trace tree
+    # in the collector; a span link would be the richer mapping, but an
+    # attribute keeps the payload valid for every OTLP backend.
+    if record.get("upstream_trace_id"):
+        attrs.append(
+            _otlp_attr("traceact.upstream_trace_id", record["upstream_trace_id"])
+        )
     if record.get("actor"):
         attrs.append(_otlp_attr("traceact.actor", record["actor"]))
     if record.get("project"):

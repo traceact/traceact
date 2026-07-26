@@ -54,12 +54,15 @@
 #                   .filter(status="failed").last(10) returns plain dicts.
 #
 #   propagate     — context manager for manual distributed propagation. Reads
-#                   the traceact-trace-id header from an incoming request and
-#                   sets correlation_id on all traces started inside the block.
+#                   traceact-trace-id and traceact-correlation-id from an
+#                   incoming request and applies them to every trace started
+#                   inside the block (as upstream_trace_id and correlation_id
+#                   respectively). Accepts any framework header object.
 #
-#   inject_headers — stamps the active trace's ID into an outbound headers dict
-#                   so the receiving service can correlate its traces back to
-#                   the caller. Returns a new dict; original is not modified.
+#   inject_headers — stamps the active trace's ID (and correlation id, when set)
+#                   into an outbound headers dict so the receiving service can
+#                   link its traces back to the caller. Returns a new dict;
+#                   the original is not modified.
 #
 #   TraceActMiddleware     — WSGI middleware (Flask, Django). Wraps the app and
 #                   propagates automatically on every request.
@@ -76,7 +79,12 @@ from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
 from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink, OtlpSink
 from traceact.log import TraceLog
-from traceact.propagation import propagate, inject_headers
+from traceact.propagation import (
+    propagate,
+    inject_headers,
+    extract_trace_id,
+    extract_correlation_id,
+)
 from traceact.middleware import TraceActMiddleware, TraceActASGIMiddleware
 
 __all__ = [
@@ -97,6 +105,8 @@ __all__ = [
     "TraceLog",
     "propagate",
     "inject_headers",
+    "extract_trace_id",
+    "extract_correlation_id",
     "TraceActMiddleware",
     "TraceActASGIMiddleware",
 ]

@@ -206,6 +206,7 @@ function filteredTraces() {
     if ((t.kind || "").toLowerCase().includes(q)) return true;
     if ((t.status || "").toLowerCase().includes(q)) return true;
     if ((t.correlation_id || "").toLowerCase().includes(q)) return true;
+    if ((t.upstream_trace_id || "").toLowerCase().includes(q)) return true;
     return (t.touches || []).some((x) =>
       (x.target || "").toLowerCase().includes(q)
     );
@@ -250,6 +251,12 @@ function inspectorSummary(t) {
   }
   if (t.root_trace_id && t.root_trace_id !== t.trace_id) {
     lines.push(`Root:     ${shortId(t.root_trace_id)}`);
+  }
+  if (t.upstream_trace_id) {
+    // The trace in another service that triggered this one. Shown in full for
+    // the same reason as correlation id: it is meant to be copied and searched
+    // against that other service's traces.
+    lines.push(`Upstream: ${t.upstream_trace_id}`);
   }
   if (t.correlation_id) {
     // Shown in full (not shortId-truncated): the point of a correlation id is

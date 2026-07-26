@@ -201,6 +201,7 @@ def reset_config() -> None:
         - TraceBudget → package defaults
         - Sink list   → empty (no sinks)
         - Active trace ContextVar → None (no active trace)
+        - Distributed propagation ContextVars → None (no inbound context)
 
     What it does NOT reset:
         - Traces that have already been written to a sink. Those are gone.
@@ -217,6 +218,17 @@ def reset_config() -> None:
     # (context.py does not import config.py).
     from traceact.context import _active_trace
     _active_trace.set(None)
+
+    # Clear inbound propagation context too. A test that drives a WSGI app
+    # through a caller that skips the PEP 3333 close() contract (Werkzeug's
+    # test client does exactly this) would otherwise leave an upstream trace ID
+    # set on the thread, silently attaching it to every trace in later tests.
+    from traceact.propagation import (
+        _INCOMING_CORRELATION_ID,
+        _INCOMING_TRACE_ID,
+    )
+    _INCOMING_TRACE_ID.set(None)
+    _INCOMING_CORRELATION_ID.set(None)
 
 
 def get_package_config() -> Optional[TraceConfig]:

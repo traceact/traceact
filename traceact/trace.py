@@ -484,6 +484,7 @@ class ActionTrace(TraceHelpersMixin):
         project: Optional[str] = None,
         parent: Optional["ActionTrace"] = None,
         correlation_id: Optional[str] = None,
+        upstream_trace_id: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
         depth: int = 0,
         effective_config: Optional[_EffectiveConfig] = None,
@@ -500,6 +501,14 @@ class ActionTrace(TraceHelpersMixin):
             project:          The application or project name (for grouping in output).
             parent:           The parent ActionTrace, if this is a child trace.
             correlation_id:   A shared ID linking related traces across a workflow.
+                              Business-level grouping, assigned by the developer
+                              or carried in from an upstream service.
+            upstream_trace_id: The trace_id of the trace in a *different service*
+                              that triggered this one, carried in over the
+                              traceact-trace-id header. Causal lineage across a
+                              service boundary — distinct from parent_trace_id
+                              (in-process nesting) and from correlation_id
+                              (workflow grouping).
             meta:             Arbitrary developer-supplied metadata.
             depth:            Nesting depth (0 = root, 1 = first child, etc.).
             effective_config: Pre-resolved config (from _resolve_config).
@@ -518,6 +527,11 @@ class ActionTrace(TraceHelpersMixin):
             parent.trace_id if parent is not None else None
         )
         self.correlation_id: Optional[str] = correlation_id
+
+        # Cross-service lineage. parent_trace_id is in-process nesting;
+        # upstream_trace_id is the trace in another service that called us.
+        # A trace can have both, one, or neither.
+        self.upstream_trace_id: Optional[str] = upstream_trace_id
 
         # --- Descriptive fields ---
         self.project: Optional[str] = project
@@ -587,6 +601,7 @@ class ActionTrace(TraceHelpersMixin):
         actor: Optional[str] = None,
         project: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        upstream_trace_id: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
         config: Optional[TraceConfig] = None,
         budget: Optional[TraceBudget] = None,
@@ -616,6 +631,7 @@ class ActionTrace(TraceHelpersMixin):
             actor=actor,
             project=project,
             correlation_id=correlation_id,
+            upstream_trace_id=upstream_trace_id,
             meta=meta,
             config_override=config,
             budget_override=budget,
@@ -1062,6 +1078,7 @@ class ActionTrace(TraceHelpersMixin):
             "trace_id": self.trace_id,
             "root_trace_id": self.root_trace_id,
             "parent_trace_id": self.parent_trace_id,
+            "upstream_trace_id": self.upstream_trace_id,
             "correlation_id": self.correlation_id,
             "project": self.project,
             "action": self.action,
@@ -1093,6 +1110,7 @@ def _create_trace(
     actor: Optional[str] = None,
     project: Optional[str] = None,
     correlation_id: Optional[str] = None,
+    upstream_trace_id: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
     config_override: Optional[TraceConfig] = None,
     budget_override: Optional[TraceBudget] = None,
@@ -1130,13 +1148,23 @@ def _create_trace(
         An ActionTrace ready to be entered (via with or the decorator), or a
         _NoOpTrace if tracing cannot run.
     """
-    # Auto-populate correlation_id from the propagation context when the caller
-    # didn't supply one explicitly. This is how distributed propagation works:
-    # the WSGI/ASGI middleware (or a manual propagate() block) sets
-    # _INCOMING_TRACE_ID, and all traces started in that context inherit it.
-    if correlation_id is None:
-        from traceact.propagation import _INCOMING_TRACE_ID
-        correlation_id = _INCOMING_TRACE_ID.get()
+    # Apply the distributed propagation context when the caller didn't supply
+    # these explicitly. The WSGI/ASGI middleware (or a manual propagate() block)
+    # sets these ContextVars for the lifetime of an inbound request.
+    #
+    # The two fields are deliberately separate: upstream_trace_id is the calling
+    # service's trace (causal lineage), correlation_id is the workflow-wide
+    # grouping ID passed through untouched. Folding one into the other would
+    # lose whichever the upstream service actually set.
+    if upstream_trace_id is None or correlation_id is None:
+        from traceact.propagation import (
+            _INCOMING_CORRELATION_ID,
+            _INCOMING_TRACE_ID,
+        )
+        if upstream_trace_id is None:
+            upstream_trace_id = _INCOMING_TRACE_ID.get()
+        if correlation_id is None:
+            correlation_id = _INCOMING_CORRELATION_ID.get()
 
     # --- Check 1: is tracing enabled? ---
     # Resolve config first so we can check the enabled flag.
@@ -1180,6 +1208,7 @@ def _create_trace(
         project=project,
         parent=parent,
         correlation_id=correlation_id,
+        upstream_trace_id=upstream_trace_id,
         meta=meta,
         depth=depth,
         effective_config=effective_config,
