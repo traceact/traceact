@@ -23,14 +23,17 @@
     <!-- Left navigation -->
     <aside class="sidebar">
       <div class="brand">
-        <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
-          <rect x="0" y="0" width="32" height="32" rx="7" fill="#0d1114"/>
-          <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="6.25" fill="none" stroke="#353F44" stroke-width="1.5"/>
-          <circle cx="8.5" cy="17.5" r="1.8" fill="#0d1114" stroke="#4ade80" stroke-width="1.6"/>
-          <path d="M8.5 17.5 L13.5 22.5 L24 10.5" fill="none" stroke="#4ade80" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle cx="24" cy="10.5" r="2.1" fill="#4ade80"/>
-        </svg>
-        TraceAct
+        <div class="brand-row">
+          <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+            <rect x="0" y="0" width="32" height="32" rx="7" fill="#0d1114"/>
+            <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="6.25" fill="none" stroke="#353F44" stroke-width="1.5"/>
+            <circle cx="8.5" cy="17.5" r="1.8" fill="#0d1114" stroke="#4ade80" stroke-width="1.6"/>
+            <path d="M8.5 17.5 L13.5 22.5 L24 10.5" fill="none" stroke="#4ade80" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="24" cy="10.5" r="2.1" fill="#4ade80"/>
+          </svg>
+          TraceAct
+        </div>
+        <span class="version-badge" id="version-badge"></span>
       </div>
       <nav class="nav">
         <button data-nav="traces" class="active">Traces</button>
@@ -45,9 +48,13 @@
         <div class="subtitle">
           <span id="source-name" class="muted">no source</span>
           <span class="muted">·</span>
-          <button class="source-picker empty" id="source-picker">
-            <span id="source-path">select a source</span> ▾
-          </button>
+          <span class="path-chip">
+            <button class="source-picker empty" id="source-picker">
+              <span id="source-path">select a source</span> ▾
+            </button>
+            <button class="path-copy-btn" id="source-path-copy"
+                    title="Copy full path" aria-label="Copy full path" hidden>⧉</button>
+          </span>
         </div>
         <div class="tabs">
           <button data-tab="log" class="active">Trace log</button>

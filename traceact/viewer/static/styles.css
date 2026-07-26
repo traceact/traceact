@@ -103,6 +103,12 @@ body {
 
 .brand {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.brand-row {
+  display: flex;
   align-items: center;
   gap: 9px;
   font-weight: 600;
@@ -115,6 +121,14 @@ body {
   height: 20px;
   flex-shrink: 0;
   display: block;
+}
+
+/* Aligned under the brand text, past the icon (20px) + row gap (9px). */
+.version-badge {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-faint);
+  padding-left: 29px;
 }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
@@ -180,6 +194,31 @@ body {
   color: var(--accent);
 }
 .source-picker.empty:hover { border-color: var(--accent); background: rgba(74, 222, 128, 0.08); }
+
+/* Path display: the copy button stays invisible until the chip is hovered,
+   so a screenshot taken without deliberately hovering never shows it. */
+.path-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.path-copy-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.path-chip:hover .path-copy-btn { opacity: 1; pointer-events: auto; }
+.path-copy-btn:hover { color: var(--accent); background: var(--bg-hover); }
+.path-copy-btn.copied { opacity: 1; pointer-events: none; color: var(--accent); }
+.path-copy-btn.copy-failed { opacity: 1; pointer-events: none; color: var(--status-failed); }
 
 .tabs { display: flex; gap: 22px; }
 
@@ -605,6 +644,9 @@ body {
 .source-option:hover { background: var(--bg-hover); }
 .source-option .name { color: var(--text); }
 .source-option .path { color: var(--text-faint); font-size: 11px; }
+/* .path-chip defaults to inline-flex for the header's inline usage; here it
+   needs to sit on its own line under .name, so it takes the block it replaced. */
+.source-option .path-chip { display: flex; align-items: center; }
 
 /* Drop zone */
 .drop-zone {

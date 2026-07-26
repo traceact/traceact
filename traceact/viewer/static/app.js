@@ -43,6 +43,8 @@ function init() {
   wireModal();
   wireReplayControls();
   wireDoctor();
+  wireCopyButtons(document);  // the header's static copy button
+  loadVersion();
   initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
 
   refreshSources().then(() => {
@@ -53,6 +55,20 @@ function init() {
       renderLog();
     }
   });
+}
+
+/* ---- Version badge ---------------------------------------------------- */
+
+async function loadVersion() {
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    if (data && data.version) {
+      document.getElementById("version-badge").textContent = `v${data.version}`;
+    }
+  } catch (e) {
+    /* leave the badge empty rather than showing a wrong or stale version */
+  }
 }
 
 /* ---- Sources --------------------------------------------------------- */
@@ -95,8 +111,12 @@ function selectSource(name) {
 
   document.getElementById("source-name").textContent = source.name;
   document.getElementById("source-name").classList.remove("muted");
-  document.getElementById("source-path").textContent = source.path;
+  document.getElementById("source-path").textContent = shortenPath(source.path);
   document.getElementById("source-picker").classList.remove("empty");
+
+  const copyBtn = document.getElementById("source-path-copy");
+  copyBtn.dataset.full = source.path;
+  copyBtn.hidden = false;
 
   openStream(name);
   renderLog();
@@ -974,10 +994,88 @@ function renderSourceList() {
   list.innerHTML = state.sources.map((s) => `
     <div class="source-option" data-name="${esc(s.name)}">
       <div class="name">${esc(s.name)}</div>
-      <div class="path">${esc(s.path)}</div>
+      <span class="path-chip">
+        <div class="path">${esc(shortenPath(s.path))}</div>
+        <button class="path-copy-btn" data-full="${esc(s.path)}"
+                title="Copy full path" aria-label="Copy full path">⧉</button>
+      </span>
     </div>`).join("");
   list.querySelectorAll(".source-option").forEach((row) => {
     row.addEventListener("click", () => { selectSource(row.dataset.name); closeModal(); });
+  });
+  wireCopyButtons(list);
+}
+
+/* ---- Path display: local paths shortened, URLs shown in full --------- */
+//
+// A displayed source path can end up in a screenshot shared off the machine
+// it runs on. Local filesystem paths are shortened to their last two segments
+// with a leading ellipsis; URLs carry no local directory information, so they
+// are shown unshortened. The full, real value is always available via the
+// copy button next to the display text (see wireCopyButtons()).
+
+function isUrl(value) {
+  return /^https?:\/\//i.test(value);
+}
+
+function shortenPath(value) {
+  if (!value) return "";
+  if (isUrl(value)) return value;
+  const parts = value.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return value;
+  return "…/" + parts.slice(-2).join("/");
+}
+
+// Copies text to the clipboard. navigator.clipboard.writeText() requires a
+// secure context and can reject (permission denied, older browsers, some
+// embedded/automation contexts); execCommand("copy") via a hidden textarea
+// covers those cases. Returns a boolean rather than throwing, so callers
+// don't need their own try/catch.
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => copyViaExecCommand(text)
+    );
+  }
+  return Promise.resolve(copyViaExecCommand(text));
+}
+
+function copyViaExecCommand(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch (e) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+// Wires every .path-copy-btn under `root` to copy its data-full value.
+// stopPropagation() matters here: in the source-list modal, the copy button
+// sits inside a row that has its own click handler (select this source).
+function wireCopyButtons(root) {
+  root.querySelectorAll(".path-copy-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const full = btn.dataset.full;
+      if (!full) return;
+      copyToClipboard(full).then((ok) => {
+        btn.classList.add(ok ? "copied" : "copy-failed");
+        btn.title = ok ? "Copied" : "Copy failed — select and copy manually";
+        setTimeout(() => {
+          btn.classList.remove("copied", "copy-failed");
+          btn.title = "Copy full path";
+        }, 1200);
+      });
+    });
   });
 }
 
