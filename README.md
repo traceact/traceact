@@ -93,7 +93,7 @@ Double-click `launch.command` in the repo root to open TraceAct from Finder with
 
 The source modal (click the source name in the header) lets you:
 
-- **Choose file / Choose folder** — opens a native macOS picker; returns the real filesystem path for live tailing
+- **Choose file / Choose folder** — opens a native macOS picker; returns the filesystem path for live tailing
 - **Drag and drop** a `.jsonl` file — saved as a static snapshot in `~/.traceact/imports/`
 - **Type a path** — collapsible fallback for pasting an absolute path
 

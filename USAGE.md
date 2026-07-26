@@ -626,7 +626,7 @@ configure(config=TraceConfig(redaction_presets=["filesystem_paths", "env_vars"])
 
 An unknown preset name raises `ValueError` immediately at `TraceConfig(...)` construction, not later at trace time.
 
-Also settable per-decorator, same as any other `TraceConfig` field — but note that a decorator-level `redaction_presets` **replaces** the package-level list rather than adding to it, exactly like `capture_inputs` does:
+Also settable per-decorator, same as any other `TraceConfig` field — but note that a decorator-level `redaction_presets` **replaces** the package-level list rather than adding to it, the same way `capture_inputs` does:
 
 ```python
 @traced_action(action="report.export", kind="app",
@@ -635,7 +635,7 @@ def export_report(...):
     ...
 ```
 
-**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism exactly (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name.
+**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name.
 
 **Nested redaction example:**
 
@@ -705,7 +705,7 @@ configure(sinks=[
 ])
 ```
 
-**When to use it:** any time the inner sink is slow or remote — an HTTP collector, a database, or a high-latency filesystem. For local files on fast hardware, the overhead of `JsonlSink` alone is rarely worth wrapping.
+**When to use it:** any time the inner sink is slow or remote — an HTTP collector, a database, or a high-latency filesystem. For local files on fast hardware, `JsonlSink` alone rarely needs the extra wrapping.
 
 **Backpressure — and why drops are always observable:**
 
@@ -997,7 +997,7 @@ result["limit_reached"]  # True if more than 500 traces matched
 Two separate reasons a result might not be every match that exists:
 
 - `scan_capped` — the scan itself gave up early, per `max_lines_scanned`.
-- `limit_reached` — the scan finished (or found enough to stop), but exactly `n` results were asked for and `n` (or more) exist — there may be more beyond what's returned. This is true of `last(n)` too; `last()` just has nowhere to report it, since it returns a plain list. Note that `len(result["traces"]) == n` alone can't tell you this — a bounded scan returns at most `n` regardless of whether exactly `n` or a hundred thousand traces matched, so `limit_reached` is tracked from an actual count during the scan, not inferred from the result's length afterward.
+- `limit_reached` — the scan finished (or found enough to stop), but `n` (or more) results matched — there may be more beyond what's returned. This is true of `last(n)` too; `last()` just has nowhere to report it, since it returns a plain list. Note that `len(result["traces"]) == n` alone can't tell you this — a bounded scan returns at most `n` regardless of whether `n` or a hundred thousand traces matched, so `limit_reached` is tracked from a count taken during the scan, not inferred from the result's length afterward.
 
 Use `query()` instead of `last()` when the caller needs to distinguish those two situations — this is what the viewer's `/api/query` endpoint uses under the hood (see [Server-side search](#server-side-search-apiquery) above). `last()`/`first()` keep returning a plain list; `query()` is a separate method rather than a change to their return shape, so nothing about them breaks for existing callers.
 
@@ -1331,7 +1331,7 @@ Pass `--new` to bypass this and force a second instance — useful when you want
 
 The "Add source" modal supports three ways to load a source:
 
-- **Choose file / Choose folder buttons** — opens a native macOS file or folder picker. The picker runs on the server side via AppleScript (`osascript`), so it returns the real filesystem path and the viewer can tail it live. (Falls back to a `tkinter` dialog on non-macOS platforms.)
+- **Choose file / Choose folder buttons** — opens a native macOS file or folder picker. The picker runs on the server side via AppleScript (`osascript`), so it returns the filesystem path and the viewer can tail it live. (Falls back to a `tkinter` dialog on non-macOS platforms.)
 - **Drag and drop** — drop a `.jsonl` file onto the drop zone. The browser reads the file contents and posts them to the server, which saves a copy to `~/.traceact/imports/` and adds it as a source. Because the server holds a copy (not the original), this is a **static snapshot** — new writes to the original file won't appear. The viewer labels imported sources accordingly.
 - **Type a path** — a collapsible text input for pasting or typing an absolute path. This gives live tailing just like the command-line argument.
 
@@ -1345,7 +1345,7 @@ The "Add source" modal supports three ways to load a source:
 4. Installs or upgrades `traceact` inside that venv.
 5. Runs `traceact view`, waits for the server to be ready, then opens the browser.
 
-The Terminal window stays open so Ctrl+C stops the viewer cleanly. To pass a source file at launch from a script: `open launch.command path/to/traces.jsonl`.
+The Terminal window stays open so Ctrl+C stops the viewer. To pass a source file at launch from a script: `open launch.command path/to/traces.jsonl`.
 
 ### What the viewer shows
 
@@ -1388,9 +1388,9 @@ GET /api/query?source=traces&status=failed&action__contains=order&limit=200
 - Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls.
 - `__re` is not accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
 - **`limit` is hard-capped at 1000 server-side.** Requesting `limit=5000` against a source with 3000 matches returns only the newest 1000 — but not silently: `count` in the response is the count *returned*, not the count that matched, and `limit_reached` (below) tells you whether more may exist.
-- The response carries two separate completeness flags, both `false` when the result is genuinely everything that matched:
+- The response carries two separate completeness flags, both `false` when the result is everything that matched:
   - **`scan_capped`** — `true` if the scan hit its internal line-read ceiling before finishing reading the source.
-  - **`limit_reached`** — `true` if more traces matched than `limit` allowed back (including when a too-large requested `limit` was clamped to 1000). `count == limit` is not itself a safe signal that nothing more exists — a bounded scan always returns at most `limit` regardless of whether exactly `limit` or a hundred thousand traces matched, so this comes from an actual count taken during the scan, not from inspecting the returned list's length afterward.
+  - **`limit_reached`** — `true` if more traces matched than `limit` allowed back (including when a too-large requested `limit` was clamped to 1000). `count == limit` is not itself a safe signal that nothing more exists — a bounded scan always returns at most `limit` regardless of whether `limit` or a hundred thousand traces matched, so this comes from a count taken during the scan, not from inspecting the returned list's length afterward.
 
   Either flag `true` means the same thing to a caller: this may not be every match. The viewer shows "results may be incomplete" next to the pre-filter badges when either is set, rather than presenting a partial result as if it were exhaustive.
 
