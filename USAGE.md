@@ -983,6 +983,32 @@ log.filter(status="failed").render_table(n=25)  # cap rows shown
 
 Each terminal call re-reads the JSONL file(s) — there is no caching, so you always get the current state of a live source.
 
+`last()`/`first()` are memory-bounded: they hold at most `n` matching records per file at once rather than collecting every match before truncating. A broad filter (or no filter at all) over a large source costs memory proportional to `n`, not to how much of the source matches.
+
+### query() — bounded result plus two completeness flags
+
+```python
+result = log.filter(status="failed").query(500)
+result["traces"]         # up to 500 matches, newest-first
+result["scan_capped"]    # True if max_lines_scanned stopped the scan early
+result["limit_reached"]  # True if more than 500 traces matched
+```
+
+Two separate reasons a result might not be every match that exists:
+
+- `scan_capped` — the scan itself gave up early, per `max_lines_scanned`.
+- `limit_reached` — the scan finished (or found enough to stop), but exactly `n` results were asked for and `n` (or more) exist — there may be more beyond what's returned. This is true of `last(n)` too; `last()` just has nowhere to report it, since it returns a plain list. Note that `len(result["traces"]) == n` alone can't tell you this — a bounded scan returns at most `n` regardless of whether exactly `n` or a hundred thousand traces matched, so `limit_reached` is tracked from an actual count during the scan, not inferred from the result's length afterward.
+
+Use `query()` instead of `last()` when the caller needs to distinguish those two situations — this is what the viewer's `/api/query` endpoint uses under the hood (see [Server-side search](#server-side-search-apiquery) above). `last()`/`first()` keep returning a plain list; `query()` is a separate method rather than a change to their return shape, so nothing about them breaks for existing callers.
+
+### max_lines_scanned — bounding scan time
+
+```python
+log = TraceLog("data/traces.jsonl", max_lines_scanned=200_000)
+```
+
+Caps how many lines a scan reads (matched or not) before giving up and returning whatever was found, setting `scan_capped=True` on the next `query()` call. Defaults to `None` — unbounded, the same behaviour as before this existed. Set it when reading a source you don't control the size of, or when a single call needs a predictable worst-case cost (an HTTP handler, for instance — see below).
+
 ### Using TraceLog in tests
 
 ```python
@@ -1323,7 +1349,7 @@ The Terminal window stays open so Ctrl+C stops the viewer cleanly. To pass a sou
 
 ### What the viewer shows
 
-- **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view.
+- **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target, against the currently tailed rows. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view. A pre-filtered view opened via `TraceLog.view()` instead searches the full source on disk — see [Server-side search](#server-side-search-apiquery) below.
 - **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
 - **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play.
 - **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
@@ -1345,10 +1371,28 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | `GET` | `/api/pick?type=file\|folder` | — | `{"path":"...","cancelled":bool}` |
 | `POST` | `/api/import` | `{"name":"file.jsonl","content":"..."}` | `{"name":"...","path":"...","imported":true}` |
 | `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
+| `GET` | `/api/query?source=NAME&field[__op]=value&limit=N` | — | `{"traces":[...],"scan_capped":bool,"limit_reached":bool,"count":N}` |
 
 `/api/doctor`'s `status` is `"pass"`, `"fail"`, or `"info"`; `hint` is present only on `"fail"` checks. `ok` is `true` only if every `"pass"`/`"fail"` check passed — `"info"` checks (traceact's version, whether a viewer is running) never affect it.
 
 The SSE stream delivers one `snapshot` message (the last N traces as a JSON array) then `append` messages for each newly-written trace. A `": keepalive"` comment is sent every 0.5 s when nothing new arrives, to keep the connection alive through proxies.
+
+### Server-side search (`/api/query`)
+
+The trace log's search box and the row-limit setting both operate on the live-tailed buffer — whatever the last N traces happen to be. That's fine for the search box (a quick, instant, client-side filter over what's currently in view), but a `TraceLog.view()` pre-filter is a precise, deliberately-specified query — it needs to find its match regardless of whether that match is still inside the tail window. `/api/query` answers filters against the whole source on disk, via `TraceLog`, and the viewer routes pre-filters through it automatically. You don't need to call it directly for that to happen.
+
+```
+GET /api/query?source=traces&status=failed&action__contains=order&limit=200
+```
+
+- Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls.
+- `__re` is not accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
+- **`limit` is hard-capped at 1000 server-side.** Requesting `limit=5000` against a source with 3000 matches returns only the newest 1000 — but not silently: `count` in the response is the count *returned*, not the count that matched, and `limit_reached` (below) tells you whether more may exist.
+- The response carries two separate completeness flags, both `false` when the result is genuinely everything that matched:
+  - **`scan_capped`** — `true` if the scan hit its internal line-read ceiling before finishing reading the source.
+  - **`limit_reached`** — `true` if more traces matched than `limit` allowed back (including when a too-large requested `limit` was clamped to 1000). `count == limit` is not itself a safe signal that nothing more exists — a bounded scan always returns at most `limit` regardless of whether exactly `limit` or a hundred thousand traces matched, so this comes from an actual count taken during the scan, not from inspecting the returned list's length afterward.
+
+  Either flag `true` means the same thing to a caller: this may not be every match. The viewer shows "results may be incomplete" next to the pre-filter badges when either is set, rather than presenting a partial result as if it were exhaustive.
 
 ### Notes
 

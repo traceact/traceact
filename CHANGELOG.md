@@ -2,6 +2,15 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Viewer: server-side query endpoint (`GET /api/query`).** Fixes a real gap in the pre-filter bridge shipped in 0.5.0: `TraceLog.view()`'s pre-filters (and the search box) previously only ever filtered the live-tailed buffer (25–250 most recent traces), so a precise pre-filter could find nothing simply because the matching trace had already scrolled out of that window — not because nothing matched. The viewer now runs pre-filters against the endpoint, which searches the full source via `TraceLog`, not just the tail buffer. The search box is unchanged for now (see USAGE.md for why the two aren't the same kind of query).
+- **`TraceLog.query(n=500)`** — new method returning `{"traces": [...], "scan_capped": bool, "limit_reached": bool}`. Backs the viewer endpoint; also usable directly. `scan_capped` is `True` when `max_lines_scanned` (see below) was hit before the scan finished; `limit_reached` is `True` when more than `n` traces matched (there may be more beyond what's returned) — two separate reasons a result might not be every match, both surfaced so a partial result reads as a caveat rather than a silently incomplete answer. The viewer's endpoint applies the same signal to its own server-side `limit` clamp (requesting more than the endpoint's hard ceiling silently returns only the ceiling's worth — `limit_reached` is what tells the caller more may exist).
+- **`TraceLog(path, max_lines_scanned=None)`** — new optional constructor parameter capping how many lines a scan reads before stopping and returning what it found so far. Defaults to `None` (unbounded, current behaviour, unaffected for every existing caller). The viewer's endpoint sets a cap so a single request has a bounded worst-case cost regardless of source size.
+- **`TraceLog.last()`/`.first()` are now memory-bounded internally.** Previously collected every matching trace before truncating to `n` — a broad filter (or no filter) over a large source held the full match set in memory even though only `n` results were ever returned. Now bounded to `n` records per file at once, provably correct (a trace in the global top-`n` must be in its own file's top-`n`) rather than an approximation. No change to either method's return value or signature.
+
 ## [0.5.0] — 2026-07-26
 
 ### Added

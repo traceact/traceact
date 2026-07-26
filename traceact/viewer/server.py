@@ -13,6 +13,8 @@
 #   GET  /api/pick?type=file|folder  open a native OS dialog; returns {"path":"..."}
 #   POST /api/import              save dropped-file content, add as snapshot source
 #   GET  /api/stream?source=&limit=   Server-Sent Events: snapshot then live tail
+#   GET  /api/query?source=&<field>[__op]=&limit=   search the full source via
+#        TraceLog, not just the live-tailed buffer (see _serve_query)
 #
 # Why SSE and not WebSockets:
 # The data flow is one-directional — the server pushes traces to the browser and
@@ -39,10 +41,11 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from traceact import __version__
+from traceact.log import TraceLog
 from traceact.viewer.reader import SourceReader
 
 # Directory where drag-dropped files are saved so they can be tailed.
@@ -65,6 +68,34 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".json": "application/json; charset=utf-8",
 }
+
+# /api/query — server-side search over the full source (see TraceLog.query()).
+#
+# Query-string keys reserved for the endpoint itself, not treated as filters.
+_QUERY_RESERVED_KEYS = {"source", "limit"}
+
+# Operators the HTTP endpoint accepts. __re is deliberately excluded:
+# TraceLog.filter() passes an __re pattern straight into re.search(), which is
+# fine when the caller is trusted Python code but not when the caller is
+# whoever can reach this endpoint — a catastrophic-backtracking pattern in a
+# URL param could hang the request thread. eq/contains/startswith/endswith are
+# plain string operations with no equivalent blowup, so only those are allowed
+# here; __re remains available to direct TraceLog API users.
+_QUERY_ALLOWED_OPERATORS = {"eq", "contains", "startswith", "endswith"}
+
+# Hard ceiling on how many trace records one query can return. A requested
+# `limit` above this (or a huge one specifically intended to defeat the cap)
+# is silently reduced to this value — see the clamp in _serve_query() for
+# exactly where and why. Two things this bounds: the response payload sent to
+# the browser, and the per-file ring buffer inside TraceLog._read_bounded()
+# (each file's buffer is sized to `limit`, so an uncapped limit would also
+# defeat _read_bounded()'s own memory bound).
+_QUERY_MAX_LIMIT = 1000
+
+# Lines TraceLog will read before giving up and returning a partial,
+# scan_capped=True result, bounding a single request's worst-case cost
+# regardless of source size.
+_QUERY_MAX_LINES_SCANNED = 200_000
 
 
 class ViewerState:
@@ -137,6 +168,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_pick(parse_qs(parsed.query))
         elif route == "/api/stream":
             self._serve_stream(parse_qs(parsed.query))
+        elif route == "/api/query":
+            self._serve_query(parse_qs(parsed.query))
         else:
             self._send_error(404, "Not found")
 
@@ -304,6 +337,53 @@ class _Handler(BaseHTTPRequestHandler):
             # The browser closed the tab or navigated away. Normal; just stop.
             return
 
+    # -- server-side query ---------------------------------------------------
+
+    def _serve_query(self, query: Dict[str, list]) -> None:
+        """
+        Search the full source (not just the live-tailed buffer) and return
+        matching traces, newest-first.
+
+        This exists because the SSE tail only ever holds the last N traces in
+        memory — a pre-filtered view (TraceLog.view()) or a search term can
+        only find what's still in that window, no matter how precisely it's
+        specified. This endpoint answers the same query against the source on
+        disk instead, via TraceLog.
+        """
+        source_name = _first(query.get("source"))
+        sources = self.server.state.sources  # type: ignore[attr-defined]
+        if source_name is None or source_name not in sources:
+            self._send_json(404, {"error": "unknown source"})
+            return
+
+        limit = _to_int(_first(query.get("limit")), default=100)
+        # Clamp to [1, _QUERY_MAX_LIMIT] — a caller requesting more than the
+        # ceiling (or 0/negative) gets at most _QUERY_MAX_LIMIT results rather
+        # than an error or an unbounded response. This is NOT silent: whether
+        # the applied limit (clamped or not) was actually reached — meaning
+        # more matches may exist beyond what's returned — comes back as
+        # limit_reached from TraceLog.query() itself below. See
+        # _QUERY_MAX_LIMIT for why the ceiling exists at all.
+        limit = max(1, min(limit, _QUERY_MAX_LIMIT))
+
+        try:
+            filters = _parse_query_filters(query)
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+
+        log = TraceLog(sources[source_name], max_lines_scanned=_QUERY_MAX_LINES_SCANNED)
+        if filters:
+            log = log.filter(**filters)
+        result = log.query(limit)
+
+        self._send_json(200, {
+            "traces": result["traces"],
+            "scan_capped": result["scan_capped"],
+            "limit_reached": result["limit_reached"],
+            "count": len(result["traces"]),
+        })
+
     def _send_event(self, obj: dict) -> None:
         """Write one SSE message carrying a JSON payload."""
         self._write_raw(f"data: {json.dumps(obj, default=str)}\n\n")
@@ -413,6 +493,37 @@ def _derive_name(path: str) -> str:
         return os.path.basename(os.path.normpath(path)) or "source"
     stem = os.path.splitext(os.path.basename(path))[0]
     return stem or "source"
+
+
+def _parse_query_filters(query: Dict[str, list]) -> Dict[str, Any]:
+    """
+    Translate /api/query's URL params into TraceLog.filter() kwargs.
+
+    Every param except `source` and `limit` is a filter field, optionally
+    suffixed with __contains / __startswith / __endswith (a bare field name
+    means exact match, same as TraceLog.filter() itself).
+
+    Raises:
+        ValueError: the param uses an operator outside
+            _QUERY_ALLOWED_OPERATORS (__re, or an unknown suffix). The caller
+            turns this into a 400 — TraceLog.filter() would otherwise raise
+            its own ValueError for a genuinely unknown operator, but __re is
+            a *known*, valid TraceLog operator that this endpoint specifically
+            declines to forward (see _QUERY_ALLOWED_OPERATORS for why).
+    """
+    filters: Dict[str, Any] = {}
+    for key, values in query.items():
+        if key in _QUERY_RESERVED_KEYS:
+            continue
+        if "__" in key:
+            _field, op = key.rsplit("__", 1)
+            if op not in _QUERY_ALLOWED_OPERATORS:
+                raise ValueError(
+                    f"Operator {op!r} is not allowed over the query API "
+                    f"(allowed: {sorted(_QUERY_ALLOWED_OPERATORS)})"
+                )
+        filters[key] = _first(values)
+    return filters
 
 
 def _first(values: Optional[list]) -> Optional[str]:

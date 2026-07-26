@@ -27,6 +27,16 @@ const state = {
   // TraceLog.view(). Empty in normal usage — no effect on viewer behaviour.
   // Shape: { field: { op: "eq"|"contains"|..., value: string } }
   preFilters: {},
+  // True once /api/query has successfully seeded state.traces for the current
+  // source with a full-source (not just tail-buffer) result. See
+  // runPreFilterQuery() and its note in openStream() for why this exists.
+  queryActive: false,
+  // True if the last /api/query response signalled either scan_capped (the
+  // scan gave up early) or limit_reached (more matches existed than the
+  // limit allowed back). Two different reasons, same user-facing meaning:
+  // surfaced in the pre-filter bar so either one reads as "may be
+  // incomplete", not as a silently wrong (too-short) answer.
+  queryIncomplete: false,
   stream: null,           // the EventSource, or null
   replayPaused: false,    // whether the map replay is paused
   settings: loadSettings(),
@@ -108,6 +118,10 @@ function selectSource(name) {
   state.currentSource = name;
   state.traces = [];
   state.selected = null;
+  // Reset for the newly selected source — set again, for this source, only
+  // once (if ever) its own query below actually succeeds.
+  state.queryActive = false;
+  state.queryIncomplete = false;
 
   document.getElementById("source-name").textContent = source.name;
   document.getElementById("source-name").classList.remove("muted");
@@ -119,6 +133,11 @@ function selectSource(name) {
   copyBtn.hidden = false;
 
   openStream(name);
+  // Pre-filters (from TraceLog.view()) search the full source via /api/query,
+  // not just the live-tailed buffer — see runPreFilterQuery()'s docstring.
+  if (Object.keys(state.preFilters).length > 0) {
+    runPreFilterQuery(name);
+  }
   renderLog();
   renderInspector();
 }
@@ -137,8 +156,16 @@ function openStream(name) {
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
 
     if (msg.kind === "snapshot") {
-      // Snapshot arrives newest-first already.
-      state.traces = msg.traces.slice(0, state.settings.limit);
+      // If a pre-filter query has already seeded state.traces with a
+      // full-source result, this tail-only snapshot must not clobber it —
+      // the query's result is strictly better (whole source, not just the
+      // last N). Ordering between the two is not guaranteed (both do a full
+      // file read; either can finish first), so this is a real check, not
+      // just handling for a rare edge case. Live appends below are unaffected
+      // and keep arriving on top of whichever base is currently in place.
+      if (!state.queryActive) {
+        state.traces = msg.traces.slice(0, state.settings.limit);
+      }
     } else if (msg.kind === "append") {
       // New traces arrive oldest-first; prepend so newest ends up on top.
       for (const t of msg.traces) state.traces.unshift(t);
@@ -672,6 +699,58 @@ function setTab(tab) {
 
 /* ---- Pre-filters (TraceLog.view() integration) ----------------------- */
 
+// runPreFilterQuery — searches the FULL source via /api/query and replaces
+// state.traces with the result, instead of leaving pre-filters to only ever
+// see whatever the live tail's last-N buffer happens to still hold.
+//
+// Why this exists: filteredTraces() applies state.preFilters to state.traces,
+// but state.traces is capped at settings.limit (25-250) by the SSE tail. A
+// trace matching a precise pre-filter can easily have already scrolled out of
+// that small window on any source with real volume — the filter would then
+// find nothing not because nothing matches, but because the tail buffer never
+// held the match in the first place. /api/query answers the same filters
+// against the source on disk, so a pre-filtered view is no longer bounded by
+// how recently the matching trace happened to be tailed.
+//
+// Scope note: this wires up the pre-filter path only. The free-text search
+// box does a different kind of query (a single term OR-matched across several
+// fields) that TraceLog's AND-based, per-field filter() doesn't reproduce —
+// giving search-entire-source the same treatment needs its own design, not a
+// reuse of this endpoint, so it isn't included here.
+async function runPreFilterQuery(sourceName) {
+  const params = new URLSearchParams();
+  params.set("source", sourceName);
+  params.set("limit", String(state.settings.limit));
+  for (const [field, { op, value }] of Object.entries(state.preFilters)) {
+    const key = op === "eq" ? field : `${field}__${op}`;
+    params.set(key, value);
+  }
+
+  let data;
+  try {
+    const res = await fetch(`/api/query?${params.toString()}`);
+    if (!res.ok) return; // fall back silently to whatever the tail buffer has
+    data = await res.json();
+  } catch (e) {
+    return; // network/parse failure — same silent fallback
+  }
+
+  // A source switch (or a dismissed filter) may have happened while this
+  // request was in flight; only apply it if it's still the active source.
+  if (state.currentSource !== sourceName) return;
+
+  state.traces = data.traces;
+  state.queryActive = true;
+  // Two distinct reasons the result might not be every match that exists:
+  // scan_capped (the scan gave up early) and limit_reached (more matches were
+  // found than the limit allowed back — including when a too-large requested
+  // limit was silently clamped server-side). Either one means the same thing
+  // to a person looking at this list: it may not be everything.
+  state.queryIncomplete = !!data.scan_capped || !!data.limit_reached;
+  renderPreFilterBar(); // reflect queryIncomplete if it changed
+  scheduleRender();
+}
+
 // initPreFilters — reads ?pf_* URL params placed there by TraceLog.view() and
 // populates state.preFilters. Called once at startup. When the viewer is opened
 // normally (no pf_ params) this is a complete no-op: state.preFilters stays {},
@@ -706,7 +785,7 @@ function renderPreFilterBar() {
     return;
   }
   bar.hidden = false;
-  bar.innerHTML = entries
+  const badges = entries
     .map(([field, { op, value }]) => {
       const label = op === "eq"
         ? `${field}: ${value}`
@@ -718,6 +797,14 @@ function renderPreFilterBar() {
       </span>`;
     })
     .join("");
+  // queryIncomplete covers two distinct causes (scan_capped: the scan gave up
+  // early; limit_reached: more matches existed than the limit returned) —
+  // either way the result is real, just not necessarily every match, so this
+  // must read as a caveat, not an error.
+  const incompleteNote = state.queryIncomplete
+    ? `<span class="pf-capped-note" title="Not every match in the source may be shown — the scan stopped early or more matches exist than were returned.">⚠ results may be incomplete</span>`
+    : "";
+  bar.innerHTML = badges + incompleteNote;
 }
 
 // dismissPreFilter — removes one pre-filter, updates the URL (so a refresh

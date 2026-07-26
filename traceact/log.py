@@ -44,7 +44,8 @@ import glob
 import json
 import os
 import re as _re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Public class
@@ -62,7 +63,7 @@ class TraceLog:
     returns a new TraceLog with the added predicate; the original is unchanged.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, max_lines_scanned: Optional[int] = None) -> None:
         # Absolute path to the source file or folder. Relative paths work but
         # are resolved at read time, not at construction, so they're sensitive
         # to cwd changes between construction and the first terminal call. Use
@@ -75,6 +76,13 @@ class TraceLog:
         # can serialise them as URL params for the human viewer.
         # Each entry is (field, op, value) — e.g. ("status", "eq", "failed").
         self._specs: List[Tuple[str, str, Any]] = []
+        # Optional ceiling on how many lines .last()/.first()/.query() will
+        # read before giving up and returning whatever was found so far. None
+        # (the default) means no cap — every existing caller that doesn't pass
+        # this is completely unaffected. Set by callers reading untrusted or
+        # unbounded-size sources (the viewer's HTTP query endpoint sets one) so
+        # a single request has a predictable worst-case cost.
+        self._max_lines_scanned = max_lines_scanned
 
     # -- filtering API -------------------------------------------------------
 
@@ -130,20 +138,60 @@ class TraceLog:
         Return the n most recent matching traces (by started_at), newest first.
 
         If fewer than n traces match, all matching traces are returned.
+
+        Bounded: holds at most n matches per file in memory at once (see
+        _read_bounded), not the full matching set. This matters for a broad
+        filter (or no filter at all) over a large source — memory stays
+        proportional to n, not to how much of the source actually matches.
         """
-        traces = self._read_matching()
-        traces.sort(key=_started_at_key, reverse=True)
-        return traces[:n]
+        traces, _capped, _limit_reached = self._read_bounded(n, newest=True)
+        return traces
 
     def first(self, n: int = 10) -> List[Dict[str, Any]]:
         """
         Return the n oldest matching traces (by started_at), oldest first.
 
         If fewer than n traces match, all matching traces are returned.
+
+        Bounded the same way as last() — see _read_bounded. Oldest-n additionally
+        stops reading each file as soon as n matches are found in it, since a
+        JSONL file's lines already appear in the order they were written.
         """
-        traces = self._read_matching()
-        traces.sort(key=_started_at_key)
-        return traces[:n]
+        traces, _capped, _limit_reached = self._read_bounded(n, newest=False)
+        return traces
+
+    def query(self, n: int = 500) -> Dict[str, Any]:
+        """
+        Bounded query returning the n most recent matching traces plus two
+        separate reasons the result might not be every match that exists:
+
+        - scan_capped: the scan gave up early (max_lines_scanned was hit)
+          before it finished reading the source.
+        - limit_reached: the scan finished (or at least got far enough to find
+          n matches), but n matches is exactly what was asked for — there may
+          be more beyond it that were never counted because counting stopped
+          at n. This is true of any bounded query, not specific to an HTTP
+          caller's limit= parameter or to max_lines_scanned; last(n) has the
+          exact same property, it just has nowhere to report it.
+
+        Use this instead of last() when the caller needs to distinguish "this
+        is everything that matches" from "this is only what fit" — for example
+        an HTTP endpoint telling the browser "results may be incomplete" rather
+        than silently presenting a truncated result as exhaustive. last()/
+        first() intentionally keep returning a plain list; this is a separate
+        method rather than a change to their return type, so existing callers
+        are unaffected.
+
+        Returns:
+            {"traces": [...], "scan_capped": bool, "limit_reached": bool} —
+            traces are newest-first.
+        """
+        traces, capped, limit_reached = self._read_bounded(n, newest=True)
+        return {
+            "traces": traces,
+            "scan_capped": capped,
+            "limit_reached": limit_reached,
+        }
 
     def count(self) -> int:
         """Return the total number of matching traces."""
@@ -260,10 +308,106 @@ class TraceLog:
 
         New predicates added to the copy don't affect the original, and vice versa.
         """
-        c = TraceLog(self._path)
+        c = TraceLog(self._path, max_lines_scanned=self._max_lines_scanned)
         c._predicates = list(self._predicates)
         c._specs = list(self._specs)
         return c
+
+    def _read_bounded(
+        self, n: int, newest: bool
+    ) -> Tuple[List[Dict[str, Any]], bool, bool]:
+        """
+        Return up to n matching traces without holding more than n matches per
+        file in memory at once — the bounded counterpart to _read_matching(),
+        which collects every match before the caller truncates to n.
+
+        Correctness: if a trace X is among the true top-n most recent matches
+        across the whole source, X must also be among its own file's top-n most
+        recent matches. If it weren't, n other traces in that same file alone
+        would already be newer than X, which on its own would place X outside
+        the global top-n. So collecting each file's own top-n candidates and
+        re-selecting the global top-n from that combined (much smaller) set is
+        exact, not an approximation. The symmetric argument holds for oldest-n.
+
+        Newest-n must scan every line of every file — the most recent match
+        could be the last line — so each file's candidates are held in a
+        maxlen deque that evicts its oldest entry as new matches arrive.
+
+        Oldest-n does not need to scan a whole file: since a JSONL file's lines
+        already appear in write order, the first n matches encountered in a
+        file are already that file's oldest n, so reading stops there.
+
+        max_lines_scanned, if set, caps the total lines read (matched or not)
+        across the whole call. Hitting it stops the scan early and returns
+        whatever was collected so far rather than reading the rest of the
+        source — this bounds worst-case time (and, for an HTTP-exposed query,
+        worst-case exposure to a slow request) the same way n bounds memory.
+
+        Detecting "there were more than n matches" (limit_reached) needs its
+        own counter, not an inference from the final result's length: a
+        maxlen-n deque always ends up at length <= n whether it received
+        exactly n items or a hundred thousand, so len(result) alone can't
+        distinguish "exactly n matches, nothing more" from "far more than n,
+        most were evicted." total_matches counts every match found — cheap (an
+        int increment), unlike holding every match would be — regardless of
+        whether that match survives eviction into the final bounded result.
+
+        Returns (traces, scan_capped, limit_reached):
+          - traces: sorted, truncated to n.
+          - scan_capped: True only if max_lines_scanned was reached before
+            every file was fully read.
+          - limit_reached: True if more than n matches were found (newest-n
+            only — oldest-n's early exit per file makes an accurate total
+            uneconomical to track, and no current caller needs it there).
+        """
+        if n <= 0:
+            return [], False, False
+
+        candidates: List[Dict[str, Any]] = []
+        lines_scanned = 0
+        total_matches = 0
+        capped = False
+
+        for filepath in _jsonl_files(self._path):
+            newest_buf: Deque[Dict[str, Any]] = deque(maxlen=n)
+            oldest_matches: List[Dict[str, Any]] = []
+
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        lines_scanned += 1
+                        if (
+                            self._max_lines_scanned is not None
+                            and lines_scanned > self._max_lines_scanned
+                        ):
+                            capped = True
+                            break
+
+                        obj = _parse_line(line)
+                        if obj is None or not _passes(obj, self._predicates):
+                            continue
+
+                        total_matches += 1
+                        if newest:
+                            newest_buf.append(obj)
+                        else:
+                            oldest_matches.append(obj)
+                            if len(oldest_matches) >= n:
+                                break
+            except OSError:
+                # A file that vanished or can't be read is silently skipped.
+                continue
+
+            candidates.extend(newest_buf if newest else oldest_matches)
+            if capped:
+                # A source-wide cap was hit inside this file; later files in
+                # the source are not read at all, matching the "stop as soon
+                # as the cap is reached" contract rather than reading further
+                # files while under-reporting the ones already skipped.
+                break
+
+        candidates.sort(key=_started_at_key, reverse=newest)
+        return candidates[:n], capped, total_matches > n
 
     def _read_matching(self) -> List[Dict[str, Any]]:
         """
@@ -273,6 +417,10 @@ class TraceLog:
         Reads each .jsonl file sequentially, skipping malformed lines and files
         that can't be opened. Order within a file is preserved; folder sources
         are read in sorted filename order.
+
+        Unbounded by design: .all()/.count()/.render_table() need to see every
+        matching trace, so there is no smaller candidate set to bound memory
+        against the way _read_bounded() does for .last()/.first()/.query().
         """
         results: List[Dict[str, Any]] = []
         for filepath in _jsonl_files(self._path):
