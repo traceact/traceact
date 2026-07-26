@@ -2,7 +2,7 @@
 
 All notable changes to TraceAct are documented here.
 
-## [Unreleased]
+## [0.5.0] — 2026-07-26
 
 ### Added
 
@@ -16,6 +16,9 @@ All notable changes to TraceAct are documented here.
   - Both middlewares set their ContextVars on every request unconditionally (including to `None` when no header is present), so a request that never triggers cleanup — a caller that skips the WSGI `close()` contract, for instance — can never leak its propagation context into a later request on a reused thread. `reset_config()` also clears both ContextVars, for test isolation.
 
 - **`ai_prompts` redaction preset** — opt-in preset for AI/LLM pipelines where trace payloads must not store raw prompt text or model responses. Redacts: `raw_prompt`, `prompt_content`, `prompt_text`, `prompt`, `system_prompt`, `system_message`, `raw_response`, `response_content`, `response_text`, `conversation`, `message_content`, `messages`, `file_content`, `source_excerpt`, `context_window`, `completion`, `generation`, `output_text`. Enable with `TraceConfig(redaction_presets=["ai_prompts"])`.
+
+- **Viewer: source paths shortened for safe screenshots.** A local file or folder path shown in the header or the add-source modal now displays only its last two path segments, prefixed with an ellipsis (e.g. `…/data/traces.jsonl`); a URL source is shown in full, since it carries no local directory information. Hovering the shortened path reveals a copy button that copies the real, full path to the clipboard — the display stays short, but the full value is always one click away. Falls back to `document.execCommand("copy")` when the async Clipboard API is unavailable.
+- **Viewer: version badge.** The installed `traceact` version is now shown under the brand mark in the sidebar, read from `GET /api/health`.
 
 ## [0.4.0] — 2026-07-25
 
