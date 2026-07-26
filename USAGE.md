@@ -17,6 +17,9 @@ traceact/
                     AsyncSink (background-thread wrapper; public as of v0.4)
   helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
   ids.py          — ID generation (trc_, evt_, stp_, corr_ prefixes)
+  propagation.py  — extract_trace_id, inject_headers, propagate context manager,
+                    _INCOMING_TRACE_ID ContextVar for cross-service correlation
+  middleware.py   — TraceActMiddleware (WSGI), TraceActASGIMiddleware (ASGI)
 
   viewer/
     cli.py        — `traceact view` / `traceact show` / `traceact doctor` CLI entry point
@@ -59,6 +62,7 @@ tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 20. [Trace record schema](#trace-record-schema)
 21. [Viewing traces](#viewing-traces)
 22. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
+23. [Distributed propagation](#distributed-propagation)
 
 ---
 
@@ -1464,6 +1468,136 @@ Because `launch_or_connect` starts the viewer on `127.0.0.1` by default, the ret
 
 ---
 
+## Distributed propagation
+
+When a traced action in Service A calls Service B, TraceAct can link the two
+services' traces together by passing a `traceact-trace-id` header. Any traces
+Service B starts while handling that request will have their `correlation_id`
+set to Service A's `trace_id` automatically.
+
+### Outbound: stamp the header
+
+Use `inject_headers()` to add the propagation header to any outbound request.
+It reads the currently active trace from context and returns a new dict — the
+original is never modified.
+
+```python
+import requests
+from traceact import inject_headers
+
+with ActionTrace.start(action="order.submit") as trace:
+    headers = inject_headers({"Content-Type": "application/json"})
+    requests.post("https://payments.internal/charge", json=payload, headers=headers)
+```
+
+Works the same with `httpx`, `urllib`, or any other HTTP client — `inject_headers`
+just returns a plain dict.
+
+### Inbound: extract the header (manual)
+
+Use the `propagate` context manager when you want explicit control over
+propagation, or when your framework isn't covered by the automatic middleware:
+
+```python
+from traceact import propagate, ActionTrace
+
+def handle_charge(request):
+    with propagate(dict(request.headers)):
+        with ActionTrace.start(action="charge.process") as trace:
+            # trace.correlation_id == Service A's trace_id
+            ...
+```
+
+### Inbound: automatic via middleware (Flask / Django)
+
+```python
+from traceact import TraceActMiddleware
+
+# Flask
+app.wsgi_app = TraceActMiddleware(app.wsgi_app)
+
+# Django (in wsgi.py)
+from django.core.wsgi import get_wsgi_application
+application = TraceActMiddleware(get_wsgi_application())
+```
+
+The middleware reads `traceact-trace-id` from the WSGI environ and sets
+`correlation_id` on every trace started during that request. If the header is
+absent, the middleware is transparent.
+
+### Inbound: automatic via middleware (FastAPI / Starlette)
+
+```python
+from traceact import TraceActASGIMiddleware
+from fastapi import FastAPI
+
+app = FastAPI()
+app.add_middleware(TraceActASGIMiddleware)
+```
+
+Or wrap manually:
+
+```python
+app = TraceActASGIMiddleware(app)
+```
+
+### How the correlation chain looks in the viewer
+
+Both services write their own trace records. The link is the shared
+`correlation_id` value — `TraceLog.filter(correlation_id=...)` queries it, and
+the viewer inspector shows it in the trace summary card.
+
+```python
+from traceact import TraceLog
+
+upstream_id = "trc_abc123"
+log = TraceLog("traces.jsonl")
+related = log.filter(correlation_id=upstream_id).all()
+log.filter(correlation_id=upstream_id).view()
+```
+
+### `ai_prompts` redaction preset
+
+For AI pipelines where trace payloads must not store raw prompt text, model
+responses, or conversation history, enable the `ai_prompts` preset:
+
+```python
+configure(
+    config=TraceConfig(redaction_presets=["ai_prompts"]),
+)
+```
+
+Redacted fields include: `raw_prompt`, `prompt_content`, `system_prompt`,
+`raw_response`, `response_content`, `conversation`, `message_content`,
+`file_content`, `source_excerpt`, `context_window`, `completion`,
+`generation`, `output_text`. Safe fields like `model`, `latency_ms`,
+`prompt_id`, and token counts are unaffected.
+
+| What gets redacted | What stays |
+|---|---|
+| Raw prompts and responses | Model name, version |
+| System prompts | Token counts (as long as field name has no "token" substring) |
+| Conversation history | Latency, cost |
+| File and source excerpts | Trace IDs, correlation IDs |
+
+Combine with other presets:
+
+```python
+TraceConfig(redaction_presets=["ai_prompts", "api_keys"])
+```
+
+### Reference: header name
+
+| Direction | Header | Value |
+|---|---|---|
+| Outbound (inject) | `traceact-trace-id` | Active `ActionTrace.trace_id` |
+| Inbound (extract) | `traceact-trace-id` | Sets `correlation_id` on new traces |
+
+WSGI: the header arrives as `HTTP_TRACEACT_TRACE_ID` in the environ.
+ASGI: the header arrives as bytes in `scope["headers"]`.
+
+---
+
 ## Quick reference
 
 ```python
@@ -1476,5 +1610,9 @@ from traceact import (
     traced_action,  # decorator
     JsonlSink,      # write traces to a .jsonl file
     ConsoleSink,    # print traces to stdout
+    propagate,      # context manager for inbound propagation
+    inject_headers, # stamp outbound request headers
+    TraceActMiddleware,     # WSGI auto-propagation (Flask, Django)
+    TraceActASGIMiddleware, # ASGI auto-propagation (FastAPI, Starlette)
 )
 ```

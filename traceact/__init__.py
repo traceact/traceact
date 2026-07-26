@@ -52,6 +52,20 @@
 #                   Use instead of the viewer when code (an agent, test, or
 #                   script) needs to read traces. TraceLog("traces.jsonl")
 #                   .filter(status="failed").last(10) returns plain dicts.
+#
+#   propagate     — context manager for manual distributed propagation. Reads
+#                   the traceact-trace-id header from an incoming request and
+#                   sets correlation_id on all traces started inside the block.
+#
+#   inject_headers — stamps the active trace's ID into an outbound headers dict
+#                   so the receiving service can correlate its traces back to
+#                   the caller. Returns a new dict; original is not modified.
+#
+#   TraceActMiddleware     — WSGI middleware (Flask, Django). Wraps the app and
+#                   propagates automatically on every request.
+#
+#   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
+#                   above for async frameworks.
 
 __version__ = "0.4.0"
 
@@ -62,6 +76,8 @@ from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
 from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink, OtlpSink
 from traceact.log import TraceLog
+from traceact.propagation import propagate, inject_headers
+from traceact.middleware import TraceActMiddleware, TraceActASGIMiddleware
 
 __all__ = [
     "__version__",
@@ -79,4 +95,8 @@ __all__ = [
     "OtlpSink",
     "REDACTION_PRESETS",
     "TraceLog",
+    "propagate",
+    "inject_headers",
+    "TraceActMiddleware",
+    "TraceActASGIMiddleware",
 ]

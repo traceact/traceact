@@ -116,7 +116,7 @@ def test_unknown_preset_name_raises_at_construction():
 
 def test_redaction_presets_registry_matches_documented_names():
     assert set(REDACTION_PRESETS.keys()) == {
-        "api_keys", "http", "filesystem_paths", "env_vars",
+        "api_keys", "http", "filesystem_paths", "env_vars", "ai_prompts",
     }
 
 

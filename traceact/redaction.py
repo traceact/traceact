@@ -60,4 +60,16 @@ REDACTION_PRESETS: dict = {
     "env_vars": frozenset({
         "env", "environ", "environment", "envvar", "env_var", "dotenv",
     }),
+    # Raw AI prompt and response content. Fields commonly found in LLM pipelines
+    # where trace payloads must not store verbatim prompt text or model output
+    # (privacy, cost, or terms-of-service reasons). Only IDs, hashes, counts,
+    # and safe metadata should appear in trace records when this preset is active.
+    "ai_prompts": frozenset({
+        "raw_prompt", "prompt_content", "prompt_text", "prompt",
+        "raw_response", "response_content", "response_text",
+        "system_prompt", "system_message",
+        "conversation", "message_content", "messages",
+        "file_content", "source_excerpt", "context_window",
+        "completion", "generation", "output_text",
+    }),
 }

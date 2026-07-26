@@ -1130,6 +1130,14 @@ def _create_trace(
         An ActionTrace ready to be entered (via with or the decorator), or a
         _NoOpTrace if tracing cannot run.
     """
+    # Auto-populate correlation_id from the propagation context when the caller
+    # didn't supply one explicitly. This is how distributed propagation works:
+    # the WSGI/ASGI middleware (or a manual propagate() block) sets
+    # _INCOMING_TRACE_ID, and all traces started in that context inherit it.
+    if correlation_id is None:
+        from traceact.propagation import _INCOMING_TRACE_ID
+        correlation_id = _INCOMING_TRACE_ID.get()
+
     # --- Check 1: is tracing enabled? ---
     # Resolve config first so we can check the enabled flag.
     current = get_active_trace()

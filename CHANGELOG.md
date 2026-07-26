@@ -2,6 +2,18 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Distributed trace propagation** — link traces across service boundaries via the `traceact-trace-id` HTTP header. Any `ActionTrace` started while a propagation context is active automatically inherits the calling service's trace ID as its `correlation_id`.
+  - **`inject_headers(headers=None)`** — stamps the active trace's ID into an outbound headers dict. Returns a new dict; the original is not modified. Works with any HTTP client (`requests`, `httpx`, `urllib`).
+  - **`propagate(headers)`** — context manager for manual inbound propagation. Reads `traceact-trace-id` from the incoming headers dict and sets `correlation_id` on all traces started inside the block. Thread-safe and async-safe via `contextvars`.
+  - **`TraceActMiddleware`** — WSGI middleware for Flask and Django. Wraps the WSGI app; propagates automatically on every request. Zero config beyond `app.wsgi_app = TraceActMiddleware(app.wsgi_app)`.
+  - **`TraceActASGIMiddleware`** — ASGI middleware for FastAPI and Starlette. Add once: `app.add_middleware(TraceActASGIMiddleware)`. Passes through websocket and lifespan scopes unchanged.
+
+- **`ai_prompts` redaction preset** — opt-in preset for AI/LLM pipelines where trace payloads must not store raw prompt text or model responses. Redacts: `raw_prompt`, `prompt_content`, `prompt_text`, `prompt`, `system_prompt`, `system_message`, `raw_response`, `response_content`, `response_text`, `conversation`, `message_content`, `messages`, `file_content`, `source_excerpt`, `context_window`, `completion`, `generation`, `output_text`. Enable with `TraceConfig(redaction_presets=["ai_prompts"])`.
+
 ## [0.4.0] — 2026-07-25
 
 ### Added
