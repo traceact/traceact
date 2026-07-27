@@ -52,6 +52,7 @@ function init() {
   wireSettings();
   wireModal();
   wireReplayControls();
+  wireMapZoom();
   wireDoctor();
   wireCopyButtons(document);  // the header's static copy button
   loadVersion();
@@ -439,6 +440,46 @@ function wireInspectorButtons() {
 
 /* ---- Trace map ------------------------------------------------------- */
 
+const mapZoom = { scale: 1, tx: 0, ty: 0, lastTraceId: null };
+
+function applyMapTransform() {
+  const pan = document.getElementById("map-pan");
+  if (pan) pan.style.transform = `translate(${mapZoom.tx}px,${mapZoom.ty}px) scale(${mapZoom.scale})`;
+}
+
+/* Zoom by `factor` about a viewport point, keeping whatever sits under that
+ * point pinned in place. Defaults to the centre of the visible area, which is
+ * what the toolbar buttons want.
+ *
+ * The anchor is measured against the pan element's own rect, which already
+ * reflects the current transform. That keeps the maths independent of the
+ * wrapper's border, which otherwise offsets the transform origin and makes
+ * each wheel step drift. */
+function zoomMapBy(factor, clientX, clientY) {
+  const wrap = document.getElementById("map-wrap");
+  const pan = document.getElementById("map-pan");
+  if (!wrap || !pan) return;
+
+  const wrapRect = wrap.getBoundingClientRect();
+  if (clientX == null) clientX = wrapRect.left + wrap.clientWidth / 2;
+  if (clientY == null) clientY = wrapRect.top + wrap.clientHeight / 2;
+
+  const next = Math.max(0.2, Math.min(5, mapZoom.scale * factor));
+  const rect = pan.getBoundingClientRect();
+  const contentX = (clientX - rect.left) / mapZoom.scale;
+  const contentY = (clientY - rect.top) / mapZoom.scale;
+
+  mapZoom.tx += (clientX - contentX * next) - rect.left;
+  mapZoom.ty += (clientY - contentY * next) - rect.top;
+  mapZoom.scale = next;
+  applyMapTransform();
+}
+
+function resetMapZoom() {
+  mapZoom.scale = 1; mapZoom.tx = 0; mapZoom.ty = 0;
+  applyMapTransform();
+}
+
 function renderMap() {
   const wrap = document.getElementById("map-wrap");
   const caption = document.getElementById("map-caption");
@@ -446,11 +487,17 @@ function renderMap() {
   if (!t) {
     caption.textContent = "SELECT A TRACE";
     wrap.innerHTML = `<div class="empty-state">Pick a trace from the log.</div>`;
+    mapZoom.lastTraceId = null;
     return;
   }
   caption.textContent = `${(t.action || "").toUpperCase()} · ${shortId(t.trace_id).toUpperCase()}`;
   const { svg, order } = buildMap(t);
-  wrap.innerHTML = svg;
+  if (t.trace_id !== mapZoom.lastTraceId) {
+    mapZoom.scale = 1; mapZoom.tx = 0; mapZoom.ty = 0;
+    mapZoom.lastTraceId = t.trace_id;
+  }
+  wrap.innerHTML = `<div class="map-pan" id="map-pan">${svg}</div>`;
+  applyMapTransform();
   startReplay(order);
 }
 
@@ -642,6 +689,42 @@ function revealAll() {
   svg.querySelectorAll(".map-node").forEach((n) => n.classList.add("revealed"));
   svg.querySelectorAll(".map-edge").forEach((e) => e.classList.add("revealed"));
   svg.querySelectorAll(".map-node.active").forEach((n) => n.classList.remove("active"));
+}
+
+function wireMapZoom() {
+  const wrap = document.getElementById("map-wrap");
+  if (!wrap) return;
+
+  // Wheel: zoom around cursor position.
+  wrap.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomMapBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Drag: pan.
+  let dragStart = null;
+  wrap.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    dragStart = { x: e.clientX - mapZoom.tx, y: e.clientY - mapZoom.ty };
+    wrap.classList.add("dragging");
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragStart) return;
+    mapZoom.tx = e.clientX - dragStart.x;
+    mapZoom.ty = e.clientY - dragStart.y;
+    applyMapTransform();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragStart) return;
+    dragStart = null;
+    wrap.classList.remove("dragging");
+  });
+
+  // Zoom buttons.
+  document.getElementById("zoom-in")   ?.addEventListener("click", (e) => { e.stopPropagation(); zoomMapBy(1.25); });
+  document.getElementById("zoom-out")  ?.addEventListener("click", (e) => { e.stopPropagation(); zoomMapBy(1 / 1.25); });
+  document.getElementById("zoom-reset")?.addEventListener("click", (e) => { e.stopPropagation(); resetMapZoom(); });
 }
 
 function wireReplayControls() {

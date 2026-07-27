@@ -496,7 +496,19 @@ body {
     radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 22px 22px,
     var(--bg-panel);
   min-height: 420px;
-  overflow: auto;
+  overflow: hidden;
+  position: relative;
+  cursor: grab;
+  user-select: none;
+}
+.map-wrap.dragging { cursor: grabbing; }
+
+.map-pan {
+  transform-origin: 0 0;
+  will-change: transform;
+  display: inline-block;
+  min-width: 100%;
+  min-height: 100%;
 }
 
 .map-toolbar {
@@ -514,6 +526,21 @@ body {
 }
 
 .replay-controls { display: flex; align-items: center; gap: 10px; }
+
+.zoom-controls { display: flex; gap: 4px; }
+
+.zoom-btn {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.zoom-btn:hover { background: var(--bg-hover); }
 
 .replay-btn {
   font: inherit;
