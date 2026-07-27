@@ -1199,6 +1199,7 @@ The full JSON object written to the JSONL sink:
   "actor": "user",
   "status": "completed",
   "budget_hit": false,
+  "sampled_out": false,
   "started_at": "2026-07-20T08:30:00.000Z",
   "ended_at": "2026-07-20T08:30:00.015Z",
   "duration_ms": 15.2,
@@ -1251,6 +1252,8 @@ The full JSON object written to the JSONL sink:
 | `"cancelled"` | Explicitly stopped before finishing |
 
 **`budget_hit`** is a separate boolean field, not a status. A trace can be `"completed"` with `budget_hit: true`, meaning the function ran to completion but TraceAct stopped recording events partway through.
+
+**`sampled_out`** is `true` only on a failure record promoted from a sampled-out trace (`always_trace_errors`, on by default — see [Sampling and nested traces](#parent-and-child-traces)). Such a record has `status: "failed"` and the error, but empty `steps`/`events`/`inputs`, because nothing was recording while the action ran. It is `false` on every normally recorded trace.
 
 ---
 

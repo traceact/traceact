@@ -795,11 +795,10 @@ function renderPreFilterBar() {
     return;
   }
   bar.hidden = false;
-  // Field names and values come straight from URL params — attacker-supplied
-  // for anyone who follows a crafted ?pf_* link — so they are escaped like
-  // every other interpolation in this file, and the dismiss handler reads a
-  // data attribute instead of using an inline onclick (which would both break
-  // on quotes and reopen the injection this escaping closes).
+  // Field names and values come straight from URL params, so they are escaped
+  // like every other interpolation in this file. The dismiss handler reads a
+  // data attribute rather than an inline onclick, so a value containing quotes
+  // stays inert.
   const badges = entries
     .map(([field, { op, value }]) => {
       const label = op === "eq"
@@ -825,17 +824,14 @@ function renderPreFilterBar() {
   });
 }
 
-// dismissPreFilter — removes one pre-filter and updates the URL (so a refresh
-// doesn't re-apply it), then WIDENS the visible data to match:
+// dismissPreFilter — removes one pre-filter, updates the URL (so a refresh
+// doesn't re-apply it), and widens the visible data to match. state.traces
+// holds only rows that matched every filter including the dismissed one, so
+// widening means fetching afresh, not re-filtering what's in memory:
 //
-//   - Filters remain → re-run the server query with just those filters. The
-//     current state.traces was fetched with the dismissed filter still
-//     applied, so rows matching only the remaining filters were never
-//     fetched; re-filtering client-side could only ever narrow, not widen.
-//   - No filters remain → drop back to the plain live-tail view: clear the
-//     query flags and reopen the stream so a fresh snapshot replaces the
-//     filtered subset (which would otherwise keep masquerading as the full
-//     log until a reload).
+//   - Filters remain → re-run the server query with just those filters.
+//   - No filters remain → return to the plain live-tail view: clear the query
+//     flags and reopen the stream for a fresh full-source snapshot.
 function dismissPreFilter(field) {
   delete state.preFilters[field];
 

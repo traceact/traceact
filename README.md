@@ -6,7 +6,7 @@
 
 X-ray vision for Python code.
 
-TraceAct is a lightweight Python package for action-level tracing. It records the full story of what happens when a function runs — every step taken, resource touched, event recorded, and failure encountered — so you or your agent can understand what actually happened.
+TraceAct is a lightweight Python package for action-level tracing. It records the full story of what happens when a function runs — every step taken, resource touched, event recorded, and failure encountered — so you or your agent can understand what happened.
 
 ## Install
 
@@ -119,7 +119,7 @@ Checks Python version, that `~/.traceact` is writable, whether a viewer is alrea
 
 TraceAct exists to give you X-ray vision for your code. That means nothing TraceAct does itself should take that vision away.
 
-Wherever TraceAct might skip, drop, or truncate data — a trace sampled out by `sample_rate`, events truncated by a budget limit, records dropped by `AsyncSink` under backpressure — there is always an observable signal. The `budget_hit` flag marks truncated traces. The `AsyncSink.dropped` counter counts every dropped record. Sampling decisions are made before a trace object is created, so nothing is half-recorded.
+Wherever TraceAct might skip, drop, or truncate data, there is a signal for it. Events truncated by a budget limit set the `budget_hit` flag. Records dropped by `AsyncSink` under backpressure increment `AsyncSink.dropped`. A failure inside a sampled-out trace is recorded anyway (with `always_trace_errors`, on by default) and marked `sampled_out` so you know its detail was not captured. The one deliberate silence is a sampled-out *success* — that's what sampling is for — and it's opt-in through `sample_rate`.
 
 The design choice is always: **silent by default, observable by choice**. You decide whether to log, alert on, or ignore those signals. TraceAct never makes that decision for you.
 
