@@ -167,7 +167,14 @@ def _run_view(args: argparse.Namespace) -> int:
     print(f"TraceAct viewer running at {url}")
     print("Press Ctrl+C to stop.")
 
-    _instance.write_state(args.host, port)
+    # Only a default-port instance advertises itself as the shared viewer.
+    # An instance the user deliberately separated — via --new or an explicit
+    # --port — stays private: claiming the state file would point the next
+    # launch_or_connect() caller (another app entirely) at this instance, so
+    # that app's traces would be POSTed here and it would open a viewer
+    # showing this one's source instead of its own.
+    if not args.new and not user_chose_port:
+        _instance.write_state(args.host, port)
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -179,7 +186,11 @@ def _run_view(args: argparse.Namespace) -> int:
     finally:
         server.shutdown()
         server.server_close()
-        _instance.clear_state()
+        # Only clear the state file if this instance wrote it. A private
+        # instance clearing it would evict a still-running shared viewer's
+        # entry, making the next caller spawn a duplicate.
+        if not args.new and not user_chose_port:
+            _instance.clear_state()
     return 0
 
 

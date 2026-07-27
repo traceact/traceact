@@ -292,8 +292,17 @@ class TraceLog:
             key = f"pf_{field}" if op == "eq" else f"pf_{field}__{op}"
             params.append((key, str(value)))
 
-        base = base_url if base_url.endswith("/") else base_url + "/"
-        url = base + ("?" + urlencode(params) if params else "")
+        # launch_or_connect returns a URL that may already carry ?source=NAME
+        # pinning the viewer to this log's source. Merge the pre-filters onto
+        # it rather than rebuilding from the origin, which would drop that pin
+        # and let the viewer open on some other app's source.
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl
+        parts = urlsplit(base_url)
+        merged = parse_qsl(parts.query) + params
+        path = parts.path if parts.path else "/"
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, path, urlencode(merged), "")
+        )
 
         if open_browser:
             import threading

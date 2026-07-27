@@ -58,12 +58,19 @@ function init() {
   initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
 
   refreshSources().then(() => {
-    // If a source was seeded on the command line, stream the first one.
-    if (state.sources.length > 0) {
-      selectSource(state.sources[0].name);
-    } else {
+    if (state.sources.length === 0) {
       renderLog();
+      return;
     }
+    // ?source=NAME selects a specific source (set by launch_or_connect so an
+    // app opens on its OWN source, not whichever happens to be first in a
+    // viewer another app already started). Falls back to the first source
+    // when the param is absent, or names one that isn't registered here.
+    const requested = new URLSearchParams(window.location.search).get("source");
+    const match = requested
+      ? state.sources.find((s) => s.name === requested)
+      : null;
+    selectSource(match ? match.name : state.sources[0].name);
   });
 }
 
@@ -289,42 +296,56 @@ function inspectorSummary(t) {
   const touches = (t.touches || []).length;
   const errors = (t.errors || []).length;
 
+  // Two-column [label, value] pairs rather than pre-padded strings. A plain
+  // padded-text block (the previous approach) has no column boundary of its
+  // own, so a long value — a full correlation ID, shown untruncated so it
+  // stays copyable — either overflows the card or, once wrapped, spills its
+  // continuation under the label column instead of staying in the value
+  // column. Rendering as a CSS grid (see .insp-summary) gives the value its
+  // own column to wrap within, independent of the label column's width.
+  //
   // Always show this trace's own id. Parent and root are only shown when they
   // add information: a root trace has no parent and is its own root, so those
-  // lines would be noise. A child trace shows both, so the chain is visible.
-  const lines = [`Trace:    ${shortId(t.trace_id)}`];
+  // rows would be noise. A child trace shows both, so the chain is visible.
+  const rows = [["Trace:", shortId(t.trace_id)]];
   if (t.parent_trace_id) {
-    lines.push(`Parent:   ${shortId(t.parent_trace_id)}`);
+    rows.push(["Parent:", shortId(t.parent_trace_id)]);
   }
   if (t.root_trace_id && t.root_trace_id !== t.trace_id) {
-    lines.push(`Root:     ${shortId(t.root_trace_id)}`);
+    rows.push(["Root:", shortId(t.root_trace_id)]);
   }
   if (t.upstream_trace_id) {
     // The trace in another service that triggered this one. Shown in full for
     // the same reason as correlation id: it is meant to be copied and searched
     // against that other service's traces.
-    lines.push(`Upstream: ${t.upstream_trace_id}`);
+    rows.push(["Upstream:", t.upstream_trace_id]);
   }
   if (t.correlation_id) {
     // Shown in full (not shortId-truncated): the point of a correlation id is
     // to copy/search it outside the app (search box, jq, grep), so a 6-char
     // truncation would defeat the purpose.
-    lines.push(`Corr:     ${t.correlation_id}`);
+    rows.push(["Corr:", t.correlation_id]);
   }
-  lines.push(`Kind:     ${t.kind || ""}`);
-  lines.push(`Duration: ${fmtDurLong(t.duration_ms)}`);
-  lines.push(`Touches:  ${touches}`);
-  lines.push(`Errors:   ${errors}`);
+  rows.push(["Kind:", t.kind || ""]);
+  rows.push(["Duration:", fmtDurLong(t.duration_ms)]);
+  rows.push(["Touches:", String(touches)]);
+  rows.push(["Errors:", String(errors)]);
   if (t.sampled_out) {
     // A failure recorded from a sampled-out trace: steps/events are empty
     // because nothing was recording while the action ran.
-    lines.push(`Sampled:  error-only record (detail was not recorded)`);
+    rows.push(["Sampled:", "error-only record (detail was not recorded)"]);
   }
+
+  const summaryHtml = rows
+    .map(([label, value]) =>
+      `<span class="insp-label">${esc(label)}</span><span class="insp-value">${esc(value)}</span>`
+    )
+    .join("");
 
   return `
     <div class="insp-title">${esc(t.action)}</div>
     <div class="status status-${t.status}">● ${esc(t.status)}</div>
-    <div class="insp-summary">${esc(lines.join("\n"))}</div>
+    <div class="insp-summary">${summaryHtml}</div>
     <div class="insp-actions">
       <button class="btn btn-primary" id="btn-view-map">View trace</button>
       <button class="btn" id="btn-copy">Copy JSON</button>

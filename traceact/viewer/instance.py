@@ -121,16 +121,24 @@ def launch_or_connect(
     URL is returned immediately — no new process is started.  If nothing is
     running a background subprocess is spawned, waited on for `timeout` seconds,
     and then the URL is returned (the server is usually ready in < 0.5 s).
+
+    The returned URL carries ``?source=<name>`` when a source was given, so the
+    viewer opens on *that* source. Without it, the front-end selects whichever
+    source is first in the list — so an app adding its source to a viewer
+    another app had already started would open showing the other app's traces.
     """
     import subprocess
     import sys
     import time
+    from urllib.parse import quote
 
     existing = find_running()
     if existing is not None:
         h, p = existing["host"], existing["port"]
         if source is not None:
-            add_source_to(h, p, source)
+            added = add_source_to(h, p, source)
+            if added and added.get("name"):
+                return f"http://{h}:{p}/?source={quote(added['name'], safe='')}"
         return f"http://{h}:{p}/"
 
     # Not running — start one in the background.
@@ -147,6 +155,14 @@ def launch_or_connect(
             break
         time.sleep(0.1)
 
+    # A freshly spawned viewer was seeded with this source on the command
+    # line, so it's the only one registered — but name it explicitly anyway,
+    # so the URL stays correct if another app adds a source before the tab
+    # is opened.
+    if source is not None:
+        names = list_source_names(host, port)
+        if names:
+            return f"http://{host}:{port}/?source={quote(names[0], safe='')}"
     return f"http://{host}:{port}/"
 
 
@@ -167,3 +183,18 @@ def add_source_to(host: str, port: int, path: str,
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
+
+
+def list_source_names(host: str, port: int,
+                      timeout: float = 1.0) -> list:
+    """
+    Return the names of the sources registered with a running viewer, in the
+    order the viewer reports them. Empty list on any failure.
+    """
+    url = f"http://{host}:{port}/api/sources"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            sources = json.loads(resp.read().decode("utf-8"))
+        return [s["name"] for s in sources if isinstance(s, dict) and "name" in s]
+    except Exception:
+        return []

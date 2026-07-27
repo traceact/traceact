@@ -2,6 +2,19 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`launch_or_connect()` now opens the viewer on the source it added.** The returned URL carries `?source=<name>`, and the viewer honours it at startup instead of always selecting the first registered source. An app adding its source to a viewer another app had already started previously opened showing that other app's traces. `TraceLog.view()` merges its `?pf_*` params onto this URL, so a pre-filtered view stays pinned to its own source too.
+- **Re-adding a source path no longer registers a duplicate.** `add_source()` returns the existing name when the resolved absolute path is already registered, so an app calling `launch_or_connect()` on every run no longer accumulates `traces-2`, `traces-3`, … entries for one unchanging file.
+- **`traceact view --port N` / `--new` no longer claims the shared viewer slot.** A deliberately separate instance skips writing the state file (and skips clearing it on exit), so it can't capture the next `launch_or_connect()` call from an unrelated app or evict a running shared viewer's entry.
+- **Viewer: long values in the trace inspector wrap instead of overflowing.** The inspector summary is now a two-column grid, so a full-length correlation ID (shown untruncated so it stays copyable) wraps within the value column instead of running past the card edge or spilling under the label column.
+
+### Added
+
+- **Viewer: trace log column headers have tooltips**, including `T·E·B` (Touches · Errors · Budget).
+
 ## [0.6.1] — 2026-07-27
 
 ### Fixed

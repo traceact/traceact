@@ -120,8 +120,16 @@ class ViewerState:
         If no name is given, one is derived from the path: the folder name for a
         directory, or the file's stem for a file. Collisions get a numeric
         suffix so two files with the same name stay distinct.
+
+        Adding a path that is already registered returns the existing name
+        rather than registering it again — an app that calls
+        launch_or_connect() on every run would otherwise accumulate
+        traces-2, traces-3, ... entries for one unchanging file.
         """
         path = os.path.abspath(os.path.expanduser(path))
+        for existing_name, existing_path in self.sources.items():
+            if existing_path == path:
+                return existing_name
         if name is None:
             name = _derive_name(path)
         name = self._unique_name(name)
