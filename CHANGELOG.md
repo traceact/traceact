@@ -2,6 +2,16 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.8.1] — 2026-07-27
+
+### Added
+
+- **Viewer: zoom and pan on the trace map.** The mouse wheel zooms about the cursor, left-drag pans, and `+` / `−` / `⟲` buttons in the map toolbar zoom about the centre and reset. Scale is clamped to 0.2×–5×. Large traces previously ran off the panel with only a scrollbar to reach them. Selecting a different trace resets the view; re-rendering the same trace preserves it, so the replay loop doesn't fight the current zoom.
+
+### Fixed
+
+- **Viewer: static assets now send `Cache-Control: no-cache`.** The asset URLs carry no version string, so a browser's cached copy survived a package upgrade and served the previous UI against the new server — a new viewer feature could appear to be missing entirely until a hard refresh. Upgrading *to* this version may still need one hard refresh; upgrades after it won't.
+
 ## [0.8.0] — 2026-07-27
 
 ### Added
