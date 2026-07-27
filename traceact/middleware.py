@@ -118,6 +118,25 @@ class _ContextClosingIterable:
             _reset_context(self._tokens)
 
 
+class _ContextClosingIterableWithLen(_ContextClosingIterable):
+    """
+    Variant used when the wrapped body supports len().
+
+    PEP 3333 lets a server treat a body of len() == 1 specially (send the one
+    chunk with a Content-Length instead of chunked encoding). A wrapper that
+    always hides __len__ would lose that for every propagated request, so the
+    middleware picks this class when the underlying body has __len__ and the
+    plain one when it doesn't — defining __len__ unconditionally is not an
+    option, because len() raising from the inner body would break servers
+    that only check hasattr.
+    """
+
+    __slots__ = ()
+
+    def __len__(self) -> int:
+        return len(self._inner)
+
+
 class TraceActMiddleware:
     """
     WSGI middleware that applies incoming TraceAct propagation headers to every
@@ -162,6 +181,10 @@ class TraceActMiddleware:
             raise
 
         # Defer the reset to close(): the body may not have been produced yet.
+        # Preserve len() support when the underlying body has it (see
+        # _ContextClosingIterableWithLen).
+        if hasattr(result, "__len__"):
+            return _ContextClosingIterableWithLen(result, tokens)
         return _ContextClosingIterable(result, tokens)
 
 

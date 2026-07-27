@@ -2,6 +2,23 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`always_trace_errors` now holds under sampling.** Previously the sampling decision was made before the function ran and was final, so with `sample_rate < 1.0` a failed trace could be dropped even with `always_trace_errors=True` — contradicting what the docs promised. A sampled-out frame now watches for an exception and, on one, writes a failure record after the fact: the action's identity, true start/end timing, and the error, with empty steps/events/inputs (nothing was recording while the action ran) and a new `sampled_out: true` field explaining why. Each suppressed frame the exception passes through records its own failure, matching the one-record-per-traced-frame shape of an unsampled run. Successful sampled-out traces are dropped as before, and `always_trace_errors=False` keeps suppression absolute. The success path keeps sampling's near-zero overhead. `OtlpSink` emits `traceact.sampled_out` (only when true), and the viewer inspector labels these records.
+- **Sampling now suppresses nested traces under `ActionTrace.start()` too.** The skip sentinel was only pushed by the decorator; a sampled-out `with ActionTrace.start(...)` block left it unpushed, so nested traces recorded as orphan roots. `_SkippedTrace` now pushes and pops the sentinel in its own `__enter__`/`__exit__`, making the two APIs behave identically.
+- **Rotated JSONL segments are visible to folder sources again.** `JsonlSink(max_bytes=...)` renamed rotated files to `<path>.<timestamp>`, which no longer ends in `.jsonl` — so the folder-source globs in the viewer and `TraceLog` never matched them, despite the docs saying rotated segments merge into the folder view. Rotation now names segments `<stem>.<timestamp><extension>` (e.g. `traces.20260726T120000000000Z.jsonl`), and both folder-source readers additionally match `*.jsonl.*` so segments rotated by earlier versions stay reachable.
+- **Viewer: pre-filter badges escape URL-supplied values.** Field names and values from `?pf_*` params were interpolated into the pre-filter bar without escaping — the one render path in the viewer that skipped it — allowing script injection via a crafted link. Badges now escape both, the dismiss button uses a data attribute instead of an inline `onclick`, and `esc()` covers quote characters so attribute interpolations can't be broken out of anywhere in the app.
+- **Viewer: dismissing a pre-filter badge widens the results.** The badge removed the filter from later client-side filtering but kept the server-fetched rows, which only ever contained matches for all original filters — so dismissal could never add rows, and dismissing the last badge left the filtered subset displayed as the full log. Dismissal now re-runs the server query with the remaining filters, or returns to the live-tail view when none remain.
+- **Buffered sink mode is safe against concurrent writes.** `flush_buffer()` iterated and then cleared the shared buffer without a lock, so a record appended mid-flush could be cleared without ever being written. The buffer is now snapshotted and cleared atomically under a lock; records appended during a flush stay buffered for the next one.
+- **`AsyncSink.write()` after `close()` no longer restarts the worker.** It previously spawned a fresh worker thread and re-registered the atexit hook, despite the docstring saying a closed sink should not be written to again. A closed sink now counts such writes in `dropped` instead.
+- **`trace.event()` keyword arguments can no longer overwrite core event fields** (`event_id`, `status`, `depth`, ...). Extra kwargs are merged with `setdefault`, so custom fields still attach but collisions with the event's own keys are ignored.
+
+### Changed
+
+- **WSGI middleware preserves `len()` on response bodies that support it.** The streaming-safe wrapper hid `__len__`, losing the one-chunk Content-Length hint PEP 3333 servers use; the wrapper now forwards it when the underlying body has it.
+
 ## [0.6.0] — 2026-07-26
 
 ### Added

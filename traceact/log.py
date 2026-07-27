@@ -279,7 +279,7 @@ class TraceLog:
                 "Install it with: pip install traceact"
             )
         import webbrowser
-        from urllib.parse import urlencode, urljoin
+        from urllib.parse import urlencode
 
         # Ensure a viewer is running and get its base URL.
         base_url = launch_or_connect(source=self._path)
@@ -528,11 +528,16 @@ def _jsonl_files(path: str) -> List[str]:
     """
     Resolve a source path to the ordered list of .jsonl files it contains.
 
-    A file path → [that file].  A directory → sorted glob of *.jsonl inside.
+    A file path → [that file].  A directory → sorted, deduplicated union of
+    *.jsonl and *.jsonl.* — the second pattern covers segments rotated by
+    JsonlSink versions that appended the rotation timestamp after the
+    extension (current versions keep the extension last).
     A missing path → [] (no data yet — not an error).
     """
     if os.path.isdir(path):
-        return sorted(glob.glob(os.path.join(path, "*.jsonl")))
+        matches = set(glob.glob(os.path.join(path, "*.jsonl")))
+        matches.update(glob.glob(os.path.join(path, "*.jsonl.*")))
+        return sorted(matches)
     if os.path.isfile(path):
         return [path]
     return []

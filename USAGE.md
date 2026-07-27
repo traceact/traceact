@@ -403,7 +403,9 @@ def export_report():
 
 **Sampling and nested traces:**
 
-When `sample_rate < 1.0` and a trace is sampled out, a skip sentinel is pushed onto the ContextVar. All nested `@traced_action` calls inside that function also produce nothing. A child trace can't appear in the sink without its parent.
+When `sample_rate < 1.0` and a trace is sampled out, a skip sentinel is pushed onto the ContextVar. All nested `@traced_action` calls inside that function are suppressed with it — a successful child trace can't appear in the sink without its parent.
+
+One exception, on by default: with `always_trace_errors=True`, a failure inside a sampled-out trace still produces a record. Nothing was recording while the action ran, so the record carries the action's identity, true timing, and the error, but empty steps/events/inputs — marked `sampled_out: true` to explain the reduced detail. Each suppressed frame the exception passes through records its own failure, the same shape as an unsampled run. Set `always_trace_errors=False` to make suppression absolute.
 
 ---
 
@@ -665,13 +667,13 @@ JsonlSink("data/traces/traces.jsonl")
 JsonlSink("/absolute/path/to/traces.jsonl")
 ```
 
-**Rotation (`max_bytes`):** by default the file grows without limit. Pass `max_bytes` to cap the active file's size — once the next write would exceed it, the current file is renamed to `<path>.<UTC timestamp>` and a fresh file starts at `path`:
+**Rotation (`max_bytes`):** by default the file grows without limit. Pass `max_bytes` to cap the active file's size — once the next write would exceed it, the current file is renamed to `<stem>.<UTC timestamp><extension>` (e.g. `traces.20260726T120000000000Z.jsonl` — the extension stays last so rotated segments keep matching the `*.jsonl` pattern folder sources read) and a fresh file starts at `path`:
 
 ```python
 JsonlSink("data/traces/traces.jsonl", max_bytes=50_000_000)  # cap ~50 MB per file
 ```
 
-Rotation renames rather than deletes, so history isn't lost — it's just no longer at `path`. Point the viewer at the containing **folder** rather than the single file to see the active file plus every rotated segment merged together: `traceact view data/traces/`. TraceAct doesn't currently delete old rotated segments on a schedule; clean them up yourself (e.g. a cron job or a retention script) if disk usage matters.
+Rotation renames rather than deletes, so history isn't lost — it's just no longer at `path`. Point the viewer at the containing **folder** rather than the single file to see the active file plus every rotated segment merged together: `traceact view data/traces/`. TraceAct doesn't currently delete old rotated segments on a schedule; clean them up yourself (e.g. a cron job or a retention script) to keep disk usage down.
 
 ### ConsoleSink
 
@@ -1385,7 +1387,7 @@ The trace log's search box and the row-limit setting both operate on the live-ta
 GET /api/query?source=traces&status=failed&action__contains=order&limit=200
 ```
 
-- Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls.
+- Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls. Because `source` and `limit` are reserved for the endpoint itself, trace fields with those two names can't be filtered over HTTP — use `TraceLog.filter()` directly for that.
 - `__re` is not accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
 - **`limit` is hard-capped at 1000 server-side.** Requesting `limit=5000` against a source with 3000 matches returns only the newest 1000 — but not silently: `count` in the response is the count *returned*, not the count that matched, and `limit_reached` (below) tells you whether more may exist.
 - The response carries two separate completeness flags, both `false` when the result is everything that matched:
@@ -1523,7 +1525,7 @@ they answer separate questions:
 | `traceact-trace-id` | `upstream_trace_id` | "which trace in another service triggered me?" (causal lineage) |
 | `traceact-correlation-id` | `correlation_id` | "which wider workflow do I belong to?" (business grouping, passed through untouched) |
 
-Keeping them separate matters: a trace can have an upstream parent in one
+Keeping them separate is deliberate: a trace can have an upstream parent in one
 service *and* belong to a correlation group that was assigned several hops
 earlier. Folding one into the other silently discards whichever one loses.
 

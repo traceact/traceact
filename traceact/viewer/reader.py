@@ -56,11 +56,16 @@ def _jsonl_files(path: str) -> List[str]:
     Resolve a source path to the list of .jsonl files it refers to.
 
     - A file path returns just that file.
-    - A directory returns every *.jsonl inside it, sorted for stable ordering.
+    - A directory returns every *.jsonl inside it, plus *.jsonl.* — segments
+      rotated by JsonlSink versions that appended the rotation timestamp
+      after the extension (current versions keep the extension last, so the
+      first pattern already matches them). Sorted, deduplicated.
     - A missing path returns an empty list (the source simply has no data yet).
     """
     if os.path.isdir(path):
-        return sorted(glob.glob(os.path.join(path, "*.jsonl")))
+        matches = set(glob.glob(os.path.join(path, "*.jsonl")))
+        matches.update(glob.glob(os.path.join(path, "*.jsonl.*")))
+        return sorted(matches)
     if os.path.isfile(path):
         return [path]
     return []

@@ -514,6 +514,36 @@ class TestTraceActMiddleware(_SinkTestCase):
             self.assertEqual(rec["upstream_trace_id"], "trc_stream")
             self.assertEqual(rec["correlation_id"], "corr_s")
 
+    def test_len_preserved_for_list_bodies(self):
+        # PEP 3333 servers may special-case a body of len() == 1 (single
+        # write with Content-Length instead of chunked encoding). The
+        # streaming-safe wrapper must not hide __len__ when the body has it.
+        def app_with_list_body(environ, start_response):
+            start_response("200 OK", [])
+            return [b"whole body"]
+
+        app = TraceActMiddleware(app_with_list_body)
+        body = app(self._environ(trace_id="trc_len"), lambda s, h: None)
+        assert len(body) == 1
+        list(body)
+        body.close()
+
+    def test_no_len_on_generator_bodies(self):
+        # A generator body has no __len__; the wrapper must not grow one,
+        # since len() raising from inside would break servers that only
+        # check hasattr before calling it.
+        def streaming_app(environ, start_response):
+            start_response("200 OK", [])
+            def generate():
+                yield b"chunk"
+            return generate()
+
+        app = TraceActMiddleware(streaming_app)
+        body = app(self._environ(trace_id="trc_nolen"), lambda s, h: None)
+        assert not hasattr(body, "__len__")
+        list(body)
+        body.close()
+
     def test_flask_end_to_end(self):
         """Real Flask app behind the middleware, driven by its test client."""
         from flask import Flask

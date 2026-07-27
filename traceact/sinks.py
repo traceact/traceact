@@ -45,6 +45,12 @@ from typing import Any, Dict, List, Optional
 _buffer: List[Dict[str, Any]] = []
 _flush_registered: bool = False   # True once we have registered the atexit handler
 
+# Guards _buffer against concurrent append/flush. Without it, a record
+# appended while flush_buffer() iterates and then clears the list can vanish
+# without any signal — flush takes an atomic snapshot under this lock instead,
+# and anything appended during the writes stays buffered for the next flush.
+_buffer_lock = threading.Lock()
+
 
 def _flush_on_exit() -> None:
     """
@@ -76,7 +82,8 @@ def buffer_record(record: Dict[str, Any]) -> None:
     Also ensures the atexit flush handler is registered.
     """
     _ensure_flush_registered()
-    _buffer.append(record)
+    with _buffer_lock:
+        _buffer.append(record)
 
 
 def flush_buffer(sinks: List[Any]) -> None:
@@ -84,14 +91,23 @@ def flush_buffer(sinks: List[Any]) -> None:
     Write all buffered records to each sink, then clear the buffer.
 
     Args:
-        sinks: The list of sink objects to write to.
+        sinks: The list of sink objects to write to. Note this is the sink
+               list at flush time — a record buffered under one configuration
+               and flushed after configure() replaced the sinks goes to the
+               new sinks.
 
-    This is safe to call multiple times. After flushing, the buffer is empty.
-    Calling flush when the buffer is already empty does nothing.
+    This is safe to call multiple times, and safe against concurrent
+    buffer_record() calls: the buffer is snapshotted and cleared atomically,
+    so a record appended mid-flush is kept for the next flush rather than
+    lost. Sink writes happen outside the lock so a slow sink never blocks
+    the traced application from buffering.
     """
-    if not _buffer:
-        return
-    for record in _buffer:
+    with _buffer_lock:
+        if not _buffer:
+            return
+        snapshot = list(_buffer)
+        _buffer.clear()
+    for record in snapshot:
         for sink in sinks:
             try:
                 sink.write(record)
@@ -100,7 +116,6 @@ def flush_buffer(sinks: List[Any]) -> None:
                 # observability tooling; it must never become a point of
                 # failure for the code it is observing.
                 pass
-    _buffer.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +134,12 @@ class JsonlSink:
         path: Path to the output file. The file is created if it does not exist
               and appended to if it does. Parent directories must exist.
         max_bytes: If set, rotate the file once it would exceed this size. The
-              current file is renamed to "<path>.<UTC timestamp>" and a fresh
-              file is started at `path`. Default None: never rotate.
+              current file is renamed to "<stem>.<UTC timestamp><extension>"
+              (e.g. traces.20260726T120000000000Z.jsonl) and a fresh file is
+              started at `path`. The extension is kept at the end of the name
+              so rotated segments still match the *.jsonl pattern that folder
+              sources (the viewer and TraceLog) read. Default None: never
+              rotate.
 
     Example:
         sinks=[JsonlSink("data/traces/traces.jsonl")]
@@ -198,7 +217,12 @@ class JsonlSink:
         if current_size + incoming_bytes <= self.max_bytes:
             return
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        rotated_path = f"{self.path}.{timestamp}"
+        # The timestamp goes before the extension, not after it, so a rotated
+        # segment keeps its .jsonl suffix and stays visible to the *.jsonl
+        # folder-source globs in the viewer and TraceLog. (Appending after the
+        # extension would hide every rotated segment from those readers.)
+        root, ext = os.path.splitext(self.path)
+        rotated_path = f"{root}.{timestamp}{ext}"
         try:
             os.rename(self.path, rotated_path)
         except OSError:
@@ -481,7 +505,6 @@ class SqliteSink:
 
 
 import urllib.request as _urllib_request
-import urllib.error as _urllib_error
 
 
 class HttpSink:
@@ -566,10 +589,10 @@ class HttpSink:
                 status = resp.status
             if status < 200 or status >= 300:
                 self._record_failure()
-        except (_urllib_error.URLError, OSError, Exception):
-            # Catches: connection refused, DNS failure, timeout, SSL errors,
-            # and any unexpected exception from urlopen. All are treated as
-            # delivery failures — they're counted, not re-raised.
+        except Exception:
+            # Broad on purpose: connection refused, DNS failure, timeout, SSL
+            # errors, and anything unexpected from urlopen are all treated as
+            # delivery failures — counted, never re-raised.
             self._record_failure()
 
     def _record_failure(self) -> None:
@@ -741,7 +764,7 @@ _EXPLICITLY_MAPPED = frozenset({
     "trace_id", "root_trace_id", "parent_trace_id", "upstream_trace_id",
     "correlation_id",
     "action", "kind", "status", "started_at", "ended_at", "duration_ms",
-    "budget_hit", "actor", "project",
+    "budget_hit", "sampled_out", "actor", "project",
     "inputs", "outputs", "touches",
     "steps", "events", "errors",
     "child_summaries", "meta",
@@ -793,6 +816,10 @@ def _to_otlp_span(record: Dict[str, Any]) -> Dict[str, Any]:
         attrs.append(_otlp_attr("traceact.project", record["project"]))
     if record.get("budget_hit"):
         attrs.append(_otlp_attr("traceact.budget_hit", True))
+    # Emitted only when true, like budget_hit: a promoted failure record from
+    # a sampled-out trace (empty steps/events by design).
+    if record.get("sampled_out"):
+        attrs.append(_otlp_attr("traceact.sampled_out", True))
     if record.get("duration_ms") is not None:
         attrs.append(_otlp_attr("traceact.duration_ms", record["duration_ms"]))
 
@@ -1156,6 +1183,11 @@ class AsyncSink:
         self._worker: Optional[threading.Thread] = None
         self._started = False
         self._start_lock = threading.Lock()
+        # True once close() has run. A closed sink never restarts: a write()
+        # after close() counts the record in `dropped` instead of silently
+        # spawning a fresh worker (and re-registering the atexit hook) as an
+        # earlier implementation did.
+        self._closed = False
 
         # Register a fork handler so that a child process created via os.fork()
         # gets a fresh worker thread instead of inheriting a dead one. Not all
@@ -1178,7 +1210,13 @@ class AsyncSink:
 
         The worker is started on the first call, so an AsyncSink that is never
         written to never spawns a thread.
+
+        A write after close() is counted in `dropped` and not enqueued — the
+        sink stays closed rather than restarting its worker.
         """
+        if self._closed:
+            self._record_drop()
+            return
         self._ensure_started()
 
         if self.on_full == "block":
@@ -1222,10 +1260,12 @@ class AsyncSink:
         """
         Flush all remaining records and stop the worker thread.
 
-        Safe to call more than once. After close(), the sink should not be
-        written to again. Registered with atexit on first start so that
+        Safe to call more than once. After close(), the sink is permanently
+        closed: further write() calls are counted in `dropped` rather than
+        restarting the worker. Registered with atexit on first start so that
         short-lived scripts flush automatically on exit.
         """
+        self._closed = True
         if not self._started:
             return
         # Signal the worker to finish. It will drain any remaining real records

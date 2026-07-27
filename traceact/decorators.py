@@ -271,12 +271,18 @@ def _sync_wrapper(
             database=database,
         )
 
-        # Case 1: The trace was sampled out. We must push SKIP onto the
-        # ContextVar so that nested @traced_action calls also skip.
+        # Case 1: The trace was sampled out. Push SKIP onto the ContextVar so
+        # nested @traced_action calls also skip, and let the _SkippedTrace
+        # promote a failure record if the call raises (always_trace_errors —
+        # see _SkippedTrace in trace.py).
         if isinstance(trace_or_noop, _SkippedTrace):
+            trace_or_noop._mark_started()
             token = push_trace(SKIP)
             try:
                 return func(*args, **kwargs)
+            except Exception as exc:
+                trace_or_noop._promote_failure(exc)
+                raise
             finally:
                 pop_trace(token)
 
@@ -369,11 +375,16 @@ def _async_wrapper(
             database=database,
         )
 
-        # Sampled out — push SKIP, await, restore.
+        # Sampled out — push SKIP, await, restore; promote a failure record if
+        # the call raises (always_trace_errors — see _SkippedTrace in trace.py).
         if isinstance(trace_or_noop, _SkippedTrace):
+            trace_or_noop._mark_started()
             token = push_trace(SKIP)
             try:
                 return await func(*args, **kwargs)
+            except Exception as exc:
+                trace_or_noop._promote_failure(exc)
+                raise
             finally:
                 pop_trace(token)
 

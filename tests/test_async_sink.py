@@ -204,6 +204,43 @@ class TestFaultTolerance:
 
 
 # ---------------------------------------------------------------------------
+# Closed-sink contract
+# ---------------------------------------------------------------------------
+
+class TestWriteAfterClose:
+    def test_write_after_close_is_counted_dropped_not_enqueued(self):
+        inner = CaptureSink()
+        sink = AsyncSink([inner])
+        sink.write({"trace_id": "trc_1", "action": "a"})
+        sink.close()
+
+        sink.write({"trace_id": "trc_late", "action": "b"})
+        sink.write({"trace_id": "trc_later", "action": "c"})
+
+        assert sink.dropped == 2
+        assert [r["trace_id"] for r in inner.records] == ["trc_1"]
+
+    def test_write_after_close_does_not_restart_worker(self):
+        sink = AsyncSink([CaptureSink()])
+        sink.write({"trace_id": "trc_1", "action": "a"})
+        sink.close()
+        sink.write({"trace_id": "trc_late", "action": "b"})
+        assert sink._started is False
+
+    def test_close_before_any_write_still_closes(self):
+        sink = AsyncSink([CaptureSink()])
+        sink.close()
+        sink.write({"trace_id": "trc_1", "action": "a"})
+        assert sink.dropped == 1
+
+    def test_close_twice_is_safe(self):
+        sink = AsyncSink([CaptureSink()])
+        sink.write({"trace_id": "trc_1", "action": "a"})
+        sink.close()
+        sink.close()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # Exported from public API
 # ---------------------------------------------------------------------------
 

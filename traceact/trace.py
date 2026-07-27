@@ -35,6 +35,7 @@
 # version that the trace can use directly without further checking.
 
 import json
+import random
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -542,6 +543,10 @@ class ActionTrace(TraceHelpersMixin):
         # --- Status fields ---
         self.status: str = "running"
         self.budget_hit: bool = False
+        # True only on a record promoted from a sampled-out trace because it
+        # failed (see _SkippedTrace). Explains why steps/events/inputs are
+        # empty on such a record: nothing was recording while the action ran.
+        self.sampled_out: bool = False
 
         # --- Timing fields ---
         self._started_at: datetime = datetime.now(timezone.utc)
@@ -788,9 +793,12 @@ class ActionTrace(TraceHelpersMixin):
             "depth": self._depth,
         }
 
-        # Merge any extra kwargs into the event dict.
-        if kwargs:
-            evt.update(kwargs)
+        # Merge any extra kwargs into the event dict. Core fields win: a
+        # kwarg colliding with a key the event already carries (event_id,
+        # status, depth, ...) is ignored rather than overwriting it, so an
+        # event's identity and structure can't be clobbered from a call site.
+        for key, value in kwargs.items():
+            evt.setdefault(key, value)
 
         self._events.append(evt)
         self._event_count += 1
@@ -1086,6 +1094,7 @@ class ActionTrace(TraceHelpersMixin):
             "actor": self.actor,
             "status": self.status,
             "budget_hit": self.budget_hit,
+            "sampled_out": self.sampled_out,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "duration_ms": self.duration_ms,
@@ -1175,25 +1184,46 @@ def _create_trace(
     if not effective_config.enabled:
         return _NoOpTrace()
 
+    # Resolve the budget before the skip checks: both need always_trace_errors
+    # to decide whether a suppressed frame must still be able to record a
+    # failure (see _SkippedTrace for how that promotion works).
+    effective_budget = _resolve_budget(budget_override, parent)
+
+    # Packaged identity for a possible promoted failure record. Built only on
+    # the suppressed paths below; None means "suppress absolutely".
+    def _promote_info() -> Dict[str, Any]:
+        return {
+            "action": action, "kind": kind, "actor": actor, "project": project,
+            "correlation_id": correlation_id,
+            "upstream_trace_id": upstream_trace_id,
+            "meta": meta,
+            "effective_config": effective_config,
+            "effective_budget": effective_budget,
+        }
+
     # --- Check 2: are we inside a sampled-out parent? ---
     # If the ContextVar holds the SKIP sentinel, a parent was sampled out and
-    # we must also skip. Return a _NoOpTrace so the function still runs.
+    # we must also skip — but with always_trace_errors on, a failure in this
+    # frame still needs a record, exactly as it would produce one per traced
+    # frame in an unsampled run. A promote-capable _SkippedTrace provides that;
+    # re-pushing SKIP over SKIP is harmless.
     if is_skip(current):
+        if effective_budget.always_trace_errors:
+            return _SkippedTrace(_promote_info())
         return _NoOpTrace()
 
     # --- Check 3: sampling decision ---
-    effective_budget = _resolve_budget(budget_override, parent)
-    import random
-
-    # always_trace_errors cannot be applied here because we haven't run yet
-    # and don't know if this call will fail. The sampling decision is final.
+    # The coin flip happens before the function runs, so a "kept" decision is
+    # final here — but a "dropped" decision is not: when always_trace_errors
+    # is on, the returned _SkippedTrace watches for an exception and promotes
+    # the failure into a record (status=failed, sampled_out=true, no
+    # steps/events since nothing was recording). Successful sampled-out
+    # traces stay dropped, which is the point of sampling.
     if effective_budget.sample_rate < 1.0:
         if random.random() > effective_budget.sample_rate:
-            # This trace is sampled out. Return a _NoOpTrace but also push SKIP
-            # onto the ContextVar so nested calls inherit the skip decision.
-            # The caller (decorator or context manager) is responsible for
-            # pushing SKIP and restoring it. We flag it here so the caller knows.
-            return _SkippedTrace()
+            if effective_budget.always_trace_errors:
+                return _SkippedTrace(_promote_info())
+            return _SkippedTrace(None)
 
     # --- Check 4: depth limit ---
     depth = (parent._depth + 1) if parent is not None else 0
@@ -1234,14 +1264,76 @@ def _create_trace(
 
 class _SkippedTrace(_NoOpTrace):
     """
-    A no-op trace marker that tells the decorator the trace was sampled out.
+    Stand-in for a trace suppressed by sampling.
 
-    The decorator needs to push SKIP onto the ContextVar when sampling drops a
-    trace, so nested calls also skip. A plain _NoOpTrace is returned for cases
-    where we do not need to push SKIP (e.g. tracing disabled, depth exceeded).
-    _SkippedTrace is the signal that SKIP propagation is needed.
+    Two responsibilities beyond _NoOpTrace's silence:
+
+    1. SKIP propagation. Nested calls under a sampled-out trace must also
+       skip. The decorator pushes SKIP itself around _SkippedTrace; the
+       context-manager path gets the same behaviour from __enter__/__exit__
+       here, so `with ActionTrace.start(...)` and @traced_action suppress
+       nested traces identically.
+
+    2. Failure promotion. always_trace_errors promises that no failure goes
+       unrecorded, and the sampling coin flip happens before the outcome is
+       known — so a suppressed frame watches for an exception and, on one,
+       writes a record after the fact. The promoted record carries the frame's
+       identity, true start/end timing, and the error, with sampled_out=true;
+       steps/events/inputs are empty because nothing was recording while the
+       action ran. Each suppressed frame the exception passes through promotes
+       its own record, matching how an unsampled run records a failure at
+       every traced frame on the way up. Successful suppressed traces are
+       dropped as before — that is what sampling is for.
+
+    promote_info is None when always_trace_errors is off; suppression is then
+    absolute, exactly the pre-promotion behaviour.
     """
-    pass
+
+    def __init__(self, promote_info: Optional[Dict[str, Any]] = None) -> None:
+        self._promote_info = promote_info
+        self._started_dt: Optional[datetime] = None
+        self._context_token: Any = None
+
+    def _mark_started(self) -> None:
+        """Capture the wall-clock start so a promoted record has true timing."""
+        self._started_dt = datetime.now(timezone.utc)
+
+    def _promote_failure(self, exc: BaseException) -> None:
+        """Write a failure record for this suppressed frame."""
+        if self._promote_info is None:
+            return
+        info = self._promote_info
+        trace = ActionTrace(
+            action=info["action"],
+            kind=info["kind"],
+            actor=info["actor"],
+            project=info["project"],
+            parent=None,
+            correlation_id=info["correlation_id"],
+            upstream_trace_id=info["upstream_trace_id"],
+            meta=info["meta"],
+            depth=0,
+            effective_config=info["effective_config"],
+            effective_budget=info["effective_budget"],
+        )
+        trace.sampled_out = True
+        if self._started_dt is not None:
+            trace._started_at = self._started_dt
+            trace.started_at = _iso(self._started_dt)
+        trace._finish(status="failed", error=exc)
+
+    def __enter__(self) -> "_SkippedTrace":
+        self._mark_started()
+        self._context_token = push_trace(SKIP)
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        if exc_type is not None:
+            self._promote_failure(exc_val)
+        if self._context_token is not None:
+            pop_trace(self._context_token)
+            self._context_token = None
+        return False  # never suppress the exception
 
 
 # ---------------------------------------------------------------------------

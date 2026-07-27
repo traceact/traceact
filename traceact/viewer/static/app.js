@@ -315,6 +315,11 @@ function inspectorSummary(t) {
   lines.push(`Duration: ${fmtDurLong(t.duration_ms)}`);
   lines.push(`Touches:  ${touches}`);
   lines.push(`Errors:   ${errors}`);
+  if (t.sampled_out) {
+    // A failure recorded from a sampled-out trace: steps/events are empty
+    // because nothing was recording while the action ran.
+    lines.push(`Sampled:  error-only record (detail was not recorded)`);
+  }
 
   return `
     <div class="insp-title">${esc(t.action)}</div>
@@ -717,7 +722,10 @@ function setTab(tab) {
 // fields) that TraceLog's AND-based, per-field filter() doesn't reproduce —
 // giving search-entire-source the same treatment needs its own design, not a
 // reuse of this endpoint, so it isn't included here.
+let pfQuerySeq = 0;
+
 async function runPreFilterQuery(sourceName) {
+  const seq = ++pfQuerySeq;
   const params = new URLSearchParams();
   params.set("source", sourceName);
   params.set("limit", String(state.settings.limit));
@@ -735,9 +743,11 @@ async function runPreFilterQuery(sourceName) {
     return; // network/parse failure — same silent fallback
   }
 
-  // A source switch (or a dismissed filter) may have happened while this
-  // request was in flight; only apply it if it's still the active source.
-  if (state.currentSource !== sourceName) return;
+  // A source switch, a dismissed filter, or a newer query may have happened
+  // while this request was in flight; apply the response only if it is still
+  // the latest query for the active source (two rapid dismissals otherwise
+  // race, and the slower, staler response could overwrite the newer one).
+  if (state.currentSource !== sourceName || seq !== pfQuerySeq) return;
 
   state.traces = data.traces;
   state.queryActive = true;
@@ -785,14 +795,19 @@ function renderPreFilterBar() {
     return;
   }
   bar.hidden = false;
+  // Field names and values come straight from URL params — attacker-supplied
+  // for anyone who follows a crafted ?pf_* link — so they are escaped like
+  // every other interpolation in this file, and the dismiss handler reads a
+  // data attribute instead of using an inline onclick (which would both break
+  // on quotes and reopen the injection this escaping closes).
   const badges = entries
     .map(([field, { op, value }]) => {
       const label = op === "eq"
         ? `${field}: ${value}`
         : `${field} ${op} "${value}"`;
       return `<span class="pf-badge">
-        ${label}
-        <button class="pf-badge-dismiss" onclick="dismissPreFilter('${field}')"
+        ${esc(label)}
+        <button class="pf-badge-dismiss" data-field="${esc(field)}"
                 title="Remove filter">×</button>
       </span>`;
     })
@@ -805,10 +820,22 @@ function renderPreFilterBar() {
     ? `<span class="pf-capped-note" title="Not every match in the source may be shown — the scan stopped early or more matches exist than were returned.">⚠ results may be incomplete</span>`
     : "";
   bar.innerHTML = badges + incompleteNote;
+  bar.querySelectorAll(".pf-badge-dismiss").forEach((btn) => {
+    btn.addEventListener("click", () => dismissPreFilter(btn.dataset.field));
+  });
 }
 
-// dismissPreFilter — removes one pre-filter, updates the URL (so a refresh
-// doesn't re-apply it), and re-renders the log with the remaining filters.
+// dismissPreFilter — removes one pre-filter and updates the URL (so a refresh
+// doesn't re-apply it), then WIDENS the visible data to match:
+//
+//   - Filters remain → re-run the server query with just those filters. The
+//     current state.traces was fetched with the dismissed filter still
+//     applied, so rows matching only the remaining filters were never
+//     fetched; re-filtering client-side could only ever narrow, not widen.
+//   - No filters remain → drop back to the plain live-tail view: clear the
+//     query flags and reopen the stream so a fresh snapshot replaces the
+//     filtered subset (which would otherwise keep masquerading as the full
+//     log until a reload).
 function dismissPreFilter(field) {
   delete state.preFilters[field];
 
@@ -822,6 +849,17 @@ function dismissPreFilter(field) {
   }
   const qs = params.toString();
   history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+
+  const remaining = Object.keys(state.preFilters).length;
+  if (state.currentSource) {
+    if (remaining > 0) {
+      runPreFilterQuery(state.currentSource);
+    } else {
+      state.queryActive = false;
+      state.queryIncomplete = false;
+      openStream(state.currentSource);
+    }
+  }
 
   renderPreFilterBar();
   renderLog();
@@ -1168,9 +1206,12 @@ function wireCopyButtons(root) {
 
 /* ---- Formatting helpers --------------------------------------------- */
 
+// Escapes for BOTH text and attribute contexts: quote characters are covered
+// so `attr="${esc(v)}"` can't be broken out of by a value containing quotes.
 function esc(s) {
   return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function fmtTime(iso) {

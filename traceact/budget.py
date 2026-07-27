@@ -54,18 +54,29 @@ class TraceBudget:
 
         sample_rate:
             The fraction of successful traces to record. 1.0 means record
-            everything. 0.1 means record approximately 10% of traces. Failed
-            traces (status="failed") are always recorded when always_trace_errors
-            is True, regardless of sample_rate.
+            everything. 0.1 means record approximately 10% of traces.
 
             Sampling happens before a trace object is created. If a trace is
             sampled out, the ContextVar is set to a skip sentinel so that any
-            nested @traced_action calls are also skipped. Nothing is written.
+            nested @traced_action calls are also skipped, and recording is
+            off for the whole subtree — that near-zero overhead is the point
+            of sampling. What happens to a failure inside that subtree is
+            governed by always_trace_errors below.
 
         always_trace_errors:
-            When True (default), failed traces are always recorded even if
-            sample_rate would otherwise drop them. This ensures that errors are
-            never silently lost because of sampling.
+            When True (default), a failure inside a sampled-out trace still
+            produces a record: the suppressed frame watches for an exception
+            and, on one, writes a failure record after the fact. Because
+            nothing was recording while the action ran, that record carries
+            the action's identity, true start/end timing, and the error, but
+            empty steps/events/inputs — and is marked with sampled_out=true
+            so the reduced detail is explained. Every suppressed frame the
+            exception passes through records its own failure, matching how an
+            unsampled run records one per traced frame.
+
+            When False, sampling suppression is absolute: a sampled-out trace
+            writes nothing even on failure. Use this only when the per-call
+            overhead of watching for failures is unacceptable.
     """
 
     def __init__(
@@ -100,7 +111,10 @@ class TraceBudget:
         viewer. This preset opts into a lighter footprint:
 
             sample_rate=0.1          record roughly 10% of successful traces
-            always_trace_errors=True never drop a failed trace, even when sampled
+            always_trace_errors=True every failure produces a record, even
+                                     inside a sampled-out trace (an error-only
+                                     record marked sampled_out=true — see the
+                                     always_trace_errors field docs above)
 
         So you keep a representative sample of healthy traffic while still
         capturing every failure — which is the part you most need when debugging.

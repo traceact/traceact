@@ -140,6 +140,18 @@ class TestOtlpAttr:
 # ---------------------------------------------------------------------------
 
 class TestToOtlpSpan:
+    def test_sampled_out_true_emitted_as_attribute(self):
+        span = _to_otlp_span(_trace(sampled_out=True))
+        keys = {a["key"] for a in span["attributes"]}
+        assert "traceact.sampled_out" in keys
+
+    def test_sampled_out_false_emits_no_attribute(self):
+        # Emitted only when true, like budget_hit — a false flag on every
+        # span would be attribute noise in the collector.
+        span = _to_otlp_span(_trace(sampled_out=False))
+        keys = {a["key"] for a in span["attributes"]}
+        assert "traceact.sampled_out" not in keys
+
     def test_trace_id_field(self):
         span = _to_otlp_span(_trace())
         assert span["traceId"] == _trace_id_hex("trc_order_create")
