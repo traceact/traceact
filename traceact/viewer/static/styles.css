@@ -654,7 +654,35 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 16px;
+  /* Cap the whole modal so it can't outgrow the viewport on a short window;
+     the source list below is the part that scrolls. */
+  max-height: 82vh;
+  overflow-y: auto;
 }
+
+/* The source list scrolls inside its own area rather than stretching the
+   modal: a dev machine can accumulate a source per project, and an unbounded
+   list would push the "add source" controls off-screen. ~5 rows stay visible;
+   the rest are one scroll away.
+
+   The inset panel treatment matters as much as the max-height — without a
+   visible boundary, a row clipped mid-text at the scroll edge reads as a
+   rendering fault rather than "there is more below". */
+#source-list {
+  max-height: 244px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 4px;
+}
+#source-list::-webkit-scrollbar { width: 8px; }
+#source-list::-webkit-scrollbar-track { background: transparent; }
+#source-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+#source-list::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 .modal-section-label {
   color: var(--text-faint);
   font-size: 10.5px;

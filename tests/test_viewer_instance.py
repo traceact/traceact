@@ -12,7 +12,72 @@ import unittest.mock as mock
 
 import pytest
 
-from traceact.viewer.server import ViewerState
+from traceact.viewer.server import ViewerState, _derive_name
+
+
+# ---------------------------------------------------------------------------
+# Source naming
+# ---------------------------------------------------------------------------
+#
+# Nearly every app writes to some variant of <project>/data/traces/traces.jsonl,
+# so a name taken from the filename alone reads "traces" for every project on
+# the machine. These assert the name identifies the project instead.
+
+class TestDeriveName:
+    def test_skips_generic_dirs_to_project_name(self):
+        assert _derive_name("/Users/mo/Dev/agora/data/traces/traces.jsonl") == "agora"
+
+    def test_skips_logs_dir(self):
+        assert _derive_name("/Users/mo/Dev/casewright/logs/traces.jsonl") == "casewright"
+
+    def test_two_projects_get_different_names(self):
+        # The whole point: same filename, same layout, different projects.
+        a = _derive_name("/Users/mo/Dev/agora/data/traces/traces.jsonl")
+        b = _derive_name("/Users/mo/Dev/casewright/data/traces/traces.jsonl")
+        assert a != b
+
+    def test_specific_filename_is_honoured(self):
+        # An app that already names its file per project keeps that name —
+        # the directory walk is only a fallback for generic filenames.
+        assert _derive_name("/Users/mo/Dev/agora/agora_traces.jsonl") == "agora_traces"
+
+    def test_non_generic_filename_wins_over_dir(self):
+        assert _derive_name("/Users/mo/Dev/agora/data/traces/worker.jsonl") == "worker"
+
+    def test_hidden_project_dir_loses_leading_dot(self):
+        assert _derive_name("/Users/mo/.tree/traces/traces.jsonl") == "tree"
+
+    def test_pid_shard_derives_project_not_shard(self):
+        # All shards of one project must derive the same name, or a sharded
+        # app fills the picker with near-identical entries.
+        a = _derive_name("/Users/mo/Dev/agora/data/traces/traces.1234.jsonl")
+        b = _derive_name("/Users/mo/Dev/agora/data/traces/traces.5678.jsonl")
+        assert a == b == "agora"
+
+    def test_rotated_segment_derives_project(self):
+        path = "/Users/mo/Dev/agora/data/traces/traces.20260726T120000000000Z.jsonl"
+        assert _derive_name(path) == "agora"
+
+    def test_folder_source_skips_generic_components(self):
+        assert _derive_name("/Users/mo/Dev/agora/data/traces") == "agora"
+
+    def test_all_generic_falls_back(self):
+        assert _derive_name("/data/traces/traces.jsonl") == "source"
+
+    def test_generic_matching_is_case_insensitive(self):
+        assert _derive_name("/Users/mo/Dev/agora/Data/Traces/Traces.jsonl") == "agora"
+
+    def test_traceact_state_dir_is_generic(self):
+        assert _derive_name("/Users/mo/.traceact/imports/dropped.jsonl") == "dropped"
+
+    def test_bare_filename_does_not_crash(self):
+        assert _derive_name("traces.jsonl") == "source"
+
+    def test_explicit_name_overrides_derivation(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        state = ViewerState()
+        assert state.add_source(str(f), name="agora") == "agora"
 
 
 # ---------------------------------------------------------------------------
@@ -32,12 +97,15 @@ class TestAddSourceDedupe:
     def test_repeated_adds_do_not_accumulate(self, tmp_path):
         # The reported symptom: an app calling launch_or_connect() on every
         # run produced traces-2, traces-3, traces-4 ... for one unchanging file.
+        # Asserts the dedupe property, not the derived name — the name comes
+        # from the tmp directory here and is covered by TestDeriveName.
         f = tmp_path / "traces.jsonl"
         f.write_text("")
         state = ViewerState()
         for _ in range(5):
             state.add_source(str(f))
-        assert list(state.sources) == ["traces"]
+        assert len(state.sources) == 1
+        assert not any(n.endswith("-2") for n in state.sources)
 
     def test_relative_and_absolute_path_dedupe(self, tmp_path, monkeypatch):
         f = tmp_path / "traces.jsonl"
@@ -128,6 +196,58 @@ class TestLaunchOrConnectSourcePin:
         ):
             url = instance.launch_or_connect()
         assert url == "http://127.0.0.1:8765/"
+
+    def test_explicit_name_forwarded_to_add_source(self):
+        from traceact.viewer import instance
+
+        with mock.patch.object(
+            instance, "find_running",
+            return_value={"host": "127.0.0.1", "port": 8765},
+        ), mock.patch.object(
+            instance, "add_source_to",
+            return_value={"name": "agora", "path": "/x/traces.jsonl"},
+        ) as add:
+            url = instance.launch_or_connect(source="/x/traces.jsonl", name="agora")
+        assert add.call_args.kwargs["name"] == "agora"
+        assert url == "http://127.0.0.1:8765/?source=agora"
+
+    def test_add_source_to_omits_name_when_not_given(self):
+        # The payload must not carry name=None; the server treats a missing
+        # name as "derive one" and an explicit null would be a different case.
+        from traceact.viewer import instance
+
+        captured = {}
+
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"name":"x","path":"/x"}'
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            instance.add_source_to("127.0.0.1", 8765, "/x/traces.jsonl")
+        assert captured["body"] == {"path": "/x/traces.jsonl"}
+
+    def test_add_source_to_includes_name_when_given(self):
+        from traceact.viewer import instance
+
+        captured = {}
+
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"name":"agora","path":"/x"}'
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            instance.add_source_to("127.0.0.1", 8765, "/x/traces.jsonl", name="agora")
+        assert captured["body"]["name"] == "agora"
 
     def test_failed_add_falls_back_to_bare_url(self):
         # add_source_to returns None when the running viewer can't be reached;

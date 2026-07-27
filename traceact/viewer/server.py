@@ -117,9 +117,10 @@ class ViewerState:
         """
         Register a source and return the name it was stored under.
 
-        If no name is given, one is derived from the path: the folder name for a
-        directory, or the file's stem for a file. Collisions get a numeric
-        suffix so two files with the same name stay distinct.
+        If no name is given, one is derived from the path by _derive_name(),
+        which skips generic components so a source reads as its project
+        ("agora") rather than its storage layout ("traces"). Collisions still
+        get a numeric suffix so two distinct paths stay distinguishable.
 
         Adding a path that is already registered returns the existing name
         rather than registering it again — an app that calls
@@ -495,12 +496,65 @@ def _pick_via_tkinter(pick_type: str) -> Optional[str]:
         return None
 
 
+# Path components that say where traces live, not which project they belong
+# to. Almost every app writes to some variation of <project>/data/traces/
+# traces.jsonl, so naming a source after any of these makes every project's
+# source read the same — "traces", "traces-2", "traces-3" — which is the one
+# thing the name has to distinguish.
+_GENERIC_PATH_NAMES = frozenset({
+    "traces", "trace", "tracing", "traceact",
+    "logs", "log", "logging",
+    "data", "output", "outputs", "out", "results",
+    "var", "tmp", "temp", "cache",
+    "run", "runs", "instrumentation", "telemetry",
+})
+
+
+def _is_generic_component(component: str) -> bool:
+    """True if a path component describes storage rather than a project."""
+    return component.lower().lstrip(".") in _GENERIC_PATH_NAMES
+
+
 def _derive_name(path: str) -> str:
-    """Human-friendly source name from a path: folder name, or file stem."""
+    """
+    Derive a source name that identifies the project, not the storage layout.
+
+    Two rules, in order:
+
+    1. If the file's own name is specific (``agora_traces.jsonl``), use it.
+       An app that already names its trace files per project gets that name
+       honoured as-is.
+
+    2. Otherwise walk up the directory chain and use the first component that
+       isn't generic, so ``~/Dev/agora/data/traces/traces.jsonl`` becomes
+       "agora" rather than "traces". Without this every project on a machine
+       lands on the same name and the source picker can't tell them apart.
+
+    A shard or rotation suffix (``traces.1234.jsonl``,
+    ``traces.20260726T120000000000Z.jsonl``) reduces to its first segment, so
+    every shard of one project derives the same project name.
+
+    Falls back to "source" when every component is generic. Callers that know
+    better can always pass an explicit name (see ViewerState.add_source and
+    launch_or_connect(name=...)).
+    """
+    path = os.path.normpath(path)
+    parts = [p for p in path.split(os.sep) if p]
+
     if os.path.isdir(path):
-        return os.path.basename(os.path.normpath(path)) or "source"
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return stem or "source"
+        candidates = parts
+    else:
+        stem = os.path.splitext(parts[-1])[0] if parts else ""
+        # "traces.1234" / "traces.<timestamp>" → "traces"
+        base = stem.split(".")[0]
+        if base and not _is_generic_component(base):
+            return base.lstrip(".")
+        candidates = parts[:-1]
+
+    for component in reversed(candidates):
+        if not _is_generic_component(component):
+            return component.lstrip(".") or "source"
+    return "source"
 
 
 def _parse_query_filters(query: Dict[str, list]) -> Dict[str, Any]:

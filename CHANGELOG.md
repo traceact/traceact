@@ -2,6 +2,17 @@
 
 All notable changes to TraceAct are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **Viewer: source names identify the project, not the storage layout.** Nearly every app writes to some variant of `<project>/data/traces/traces.jsonl`, so deriving the name from the filename made every project on a machine read as `traces`, `traces-2`, `traces-3` — the one thing the name has to distinguish. Name derivation now skips generic path components (`traces`, `data`, `logs`, `output`, `var`, `tmp`, …) and walks up to the first specific one, so that path reads as `agora`. A filename that already identifies the project (`agora_traces.jsonl`) is honoured as-is, and per-process shards or rotated segments (`traces.1234.jsonl`) reduce to the same project name rather than one entry each.
+
+### Added
+
+- **`launch_or_connect(name=...)`** — label a source explicitly instead of relying on path derivation, for apps that know their own identity: `launch_or_connect(source="data/traces/traces.jsonl", name="agora")`. `add_source_to()` takes the same argument.
+- **Viewer: the source picker's list scrolls within its own panel.** A dev machine accumulates a source per project; an unbounded list stretched the modal and pushed the add-source controls off-screen. The list now caps at roughly five visible rows inside a bordered, scrollable panel, and the section header shows the total (`SOURCES (10)`).
+
 ## [0.6.2] — 2026-07-27
 
 ### Fixed

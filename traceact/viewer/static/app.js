@@ -1129,6 +1129,16 @@ function closeModal() {
 function renderSourceList() {
   const list = document.getElementById("source-list");
   if (!list) return;
+
+  // The list scrolls once it outgrows its panel, so the count is the only
+  // cue to how many sources are off-screen.
+  const label = document.getElementById("source-list-label");
+  if (label) {
+    label.textContent = state.sources.length > 0
+      ? `SOURCES (${state.sources.length})`
+      : "SOURCES";
+  }
+
   if (state.sources.length === 0) {
     list.innerHTML = `<div class="muted" style="padding:6px 0">No sources yet.</div>`;
     return;

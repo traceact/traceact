@@ -96,6 +96,7 @@ def launch_or_connect(
     port: int = 8765,
     open_browser: bool = False,
     timeout: float = 3.0,
+    name: Optional[str] = None,
 ) -> str:
     """
     Ensure a viewer is running and return its URL.  Designed to be called from
@@ -126,6 +127,14 @@ def launch_or_connect(
     viewer opens on *that* source. Without it, the front-end selects whichever
     source is first in the list — so an app adding its source to a viewer
     another app had already started would open showing the other app's traces.
+
+    ``name`` labels this source in the viewer's picker. Leave it unset and the
+    viewer derives one from the path, skipping generic components so
+    ``~/Dev/agora/data/traces/traces.jsonl`` reads as "agora". Pass it when the
+    app knows its own name and shouldn't depend on where its files happen to
+    sit::
+
+        launch_or_connect(source="data/traces/traces.jsonl", name="agora")
     """
     import subprocess
     import sys
@@ -136,15 +145,17 @@ def launch_or_connect(
     if existing is not None:
         h, p = existing["host"], existing["port"]
         if source is not None:
-            added = add_source_to(h, p, source)
+            added = add_source_to(h, p, source, name=name)
             if added and added.get("name"):
                 return f"http://{h}:{p}/?source={quote(added['name'], safe='')}"
         return f"http://{h}:{p}/"
 
-    # Not running — start one in the background.
+    # Not running — start one in the background. A source is seeded on the
+    # command line only when no explicit name was given: the CLI path derives
+    # its own name, so a named source is added over HTTP once the server is up.
     cmd = [sys.executable, "-m", "traceact.viewer.cli", "view", "--no-browser",
            "--host", host, "--port", str(port)]
-    if source is not None:
+    if source is not None and name is None:
         cmd.append(source)
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -160,6 +171,10 @@ def launch_or_connect(
     # so the URL stays correct if another app adds a source before the tab
     # is opened.
     if source is not None:
+        if name is not None:
+            added = add_source_to(host, port, source, name=name)
+            if added and added.get("name"):
+                return f"http://{host}:{port}/?source={quote(added['name'], safe='')}"
         names = list_source_names(host, port)
         if names:
             return f"http://{host}:{port}/?source={quote(names[0], safe='')}"
@@ -167,13 +182,21 @@ def launch_or_connect(
 
 
 def add_source_to(host: str, port: int, path: str,
-                  timeout: float = 1.0) -> Optional[dict]:
+                  timeout: float = 1.0,
+                  name: Optional[str] = None) -> Optional[dict]:
     """
     Ask an already-running viewer to add a source. Returns the created source
     ({name, path}) or None on failure.
+
+    ``name`` labels the source explicitly; without it the viewer derives one
+    from the path. Note the viewer dedupes by path, so a path it already knows
+    keeps the name it was first registered under.
     """
     url = f"http://{host}:{port}/api/sources"
-    data = json.dumps({"path": path}).encode("utf-8")
+    payload = {"path": path}
+    if name is not None:
+        payload["name"] = name
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data,
         headers={"Content-Type": "application/json"}, method="POST",

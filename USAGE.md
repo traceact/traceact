@@ -1447,8 +1447,31 @@ launch_or_connect(
     port=8765,        # port to try if starting a new viewer
     open_browser=False,
     timeout=3.0,      # seconds to wait for a freshly started server to be ready
-) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/"
+    name=None,        # label for this source in the picker; derived from the path if unset
+) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/?source=agora"
 ```
+
+### How sources are named
+
+The viewer labels each source in its picker. Left to itself it derives the name from the path, skipping components that describe storage rather than a project (`traces`, `data`, `logs`, `output`, `var`, `tmp`, and similar):
+
+| Path | Name |
+|---|---|
+| `~/Dev/agora/data/traces/traces.jsonl` | `agora` |
+| `~/Dev/casewright/logs/traces.jsonl` | `casewright` |
+| `~/Dev/agora/agora_traces.jsonl` | `agora_traces` |
+| `~/Dev/agora/data/traces/worker.jsonl` | `worker` |
+| `~/Dev/agora/data/traces/traces.1234.jsonl` | `agora` |
+
+A filename that already identifies the project is used as-is, so an app that writes `agora_traces.jsonl` keeps that name. Only a generic filename falls through to the directory walk. Per-process shards and rotated segments reduce to the same project name, so they don't fill the picker with near-identical entries.
+
+Pass `name` when the app knows its own identity and shouldn't depend on where its files sit:
+
+```python
+launch_or_connect(source="data/traces/traces.jsonl", name="agora")
+```
+
+Sources are deduplicated by resolved path, so calling `launch_or_connect()` on every run reuses the existing entry rather than adding `agora-2`, `agora-3`, … Two different paths that derive the same name still get a numeric suffix to stay distinguishable.
 
 ### Frontend button
 
