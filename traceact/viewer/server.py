@@ -112,15 +112,19 @@ class ViewerState:
 
     def __init__(self) -> None:
         self.sources: Dict[str, str] = {}
+        # True when the name came from the project field in the trace data,
+        # False when it was derived from the file path. Used by the viewer to
+        # flag unnamed sources so developers know to set configure(project=...).
+        self.source_named: Dict[str, bool] = {}
 
     def add_source(self, path: str, name: Optional[str] = None) -> str:
         """
         Register a source and return the name it was stored under.
 
-        If no name is given, one is derived from the path by _derive_name(),
-        which skips generic components so a source reads as its project
-        ("agora") rather than its storage layout ("traces"). Collisions still
-        get a numeric suffix so two distinct paths stay distinguishable.
+        If no name is given, the project field from the first trace record is
+        used. Falls back to _derive_name() (path-based) when no project is
+        set. Collisions still get a numeric suffix so two distinct paths stay
+        distinguishable.
 
         Adding a path that is already registered returns the existing name
         rather than registering it again — an app that calls
@@ -131,10 +135,20 @@ class ViewerState:
         for existing_name, existing_path in self.sources.items():
             if existing_path == path:
                 return existing_name
+        named = False
         if name is None:
-            name = _derive_name(path)
+            project = _read_project_from_source(path)
+            if project:
+                name = project
+                named = True
+            else:
+                name = _derive_name(path)
+        else:
+            # Caller supplied an explicit name (e.g. launch_or_connect(name=...)).
+            named = True
         name = self._unique_name(name)
         self.sources[name] = path
+        self.source_named[name] = named
         return name
 
     def _unique_name(self, name: str) -> str:
@@ -285,9 +299,14 @@ class _Handler(BaseHTTPRequestHandler):
     # -- sources API -------------------------------------------------------
 
     def _serve_sources(self) -> None:
+        state = self.server.state  # type: ignore[attr-defined]
         payload = [
-            {"name": name, "path": path}
-            for name, path in self.server.state.sources.items()  # type: ignore[attr-defined]
+            {
+                "name": name,
+                "path": path,
+                "named": state.source_named.get(name, False),
+            }
+            for name, path in state.sources.items()
         ]
         self._send_json(200, payload)
 
@@ -299,9 +318,12 @@ class _Handler(BaseHTTPRequestHandler):
         name = self.server.state.add_source(  # type: ignore[attr-defined]
             body["path"], body.get("name")
         )
-        self._send_json(
-            200, {"name": name, "path": self.server.state.sources[name]}  # type: ignore[attr-defined]
-        )
+        state = self.server.state  # type: ignore[attr-defined]
+        self._send_json(200, {
+            "name": name,
+            "path": state.sources[name],
+            "named": state.source_named.get(name, False),
+        })
 
     # -- SSE stream --------------------------------------------------------
 
@@ -513,6 +535,36 @@ _GENERIC_PATH_NAMES = frozenset({
 def _is_generic_component(component: str) -> bool:
     """True if a path component describes storage rather than a project."""
     return component.lower().lstrip(".") in _GENERIC_PATH_NAMES
+
+
+def _read_project_from_source(path: str) -> Optional[str]:
+    """
+    Return the ``project`` field from the first trace record in a source, or
+    None if the source is empty, unreadable, or the field is absent/null.
+
+    For a directory source, the first lexicographically-sorted .jsonl file is
+    checked. This keeps the lookup O(1) in the common case — we only ever read
+    one line from one file.
+    """
+    try:
+        if os.path.isdir(path):
+            files = sorted(
+                f for f in os.listdir(path) if f.endswith(".jsonl")
+            )
+            if not files:
+                return None
+            target = os.path.join(path, files[0])
+        else:
+            target = path
+
+        with open(target, encoding="utf-8") as fh:
+            line = fh.readline()
+        if not line.strip():
+            return None
+        record = json.loads(line)
+        return record.get("project") or None
+    except Exception:
+        return None
 
 
 def _derive_name(path: str) -> str:

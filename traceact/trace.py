@@ -40,10 +40,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from traceact.budget import BUDGET_DEFAULTS, TraceBudget
+import warnings
+
 from traceact.config import (
     TraceConfig,
     get_package_budget,
     get_package_config,
+    get_package_project,
     get_package_sinks,
 )
 from traceact.context import SKIP, get_active_trace, is_skip, pop_trace, push_trace
@@ -1047,6 +1050,17 @@ class ActionTrace(TraceHelpersMixin):
         if mode == "disabled":
             return
 
+        # Warn once when a root trace (no parent) is about to be written with no
+        # project set. Child traces are silent — the root already told them.
+        if self.project is None and self.parent_trace_id is None:
+            warnings.warn(
+                "TraceAct: trace written without a project name. "
+                "Add project='your-app' to your configure() call so the viewer "
+                "can label this source correctly.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         sinks = get_package_sinks()
 
         # If no sinks have been configured, fall back to ConsoleSink so that
@@ -1231,11 +1245,18 @@ def _create_trace(
         return _NoOpTrace()
 
     # --- Create the real trace ---
+    # If the caller didn't specify a project, inherit from the package config,
+    # then from the parent trace. Package wins over parent so that a single
+    # configure(project=...) stamps every trace regardless of nesting depth.
+    resolved_project = project or get_package_project() or (
+        parent.project if parent is not None else None
+    )
+
     trace = ActionTrace(
         action=action,
         kind=kind,
         actor=actor,
-        project=project,
+        project=resolved_project,
         parent=parent,
         correlation_id=correlation_id,
         upstream_trace_id=upstream_trace_id,

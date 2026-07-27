@@ -20,6 +20,7 @@ pip install traceact
 from traceact import traced_action, configure, TraceConfig, JsonlSink
 
 configure(
+    project="my-app",
     config=TraceConfig(sink_mode="blocking"),
     sinks=[JsonlSink("data/traces.jsonl")],
 )

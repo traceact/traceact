@@ -17,7 +17,7 @@
  *   never grows unbounded no matter how busy the source is. */
 
 const state = {
-  sources: [],            // [{name, path}]
+  sources: [],            // [{name, path, named}] — named=false means project field was absent
   currentSource: null,    // source name currently streamed
   traces: [],             // newest-first, capped at settings.limit
   selected: null,         // the trace object shown in the inspector
@@ -1145,7 +1145,9 @@ function renderSourceList() {
   }
   list.innerHTML = state.sources.map((s) => `
     <div class="source-option" data-name="${esc(s.name)}">
-      <div class="name">${esc(s.name)}</div>
+      <div class="name">
+        ${esc(s.name)}${s.named ? "" : ' <span class="unnamed-badge" title="No project name set — add configure(project=&quot;your-app&quot;) to your traceact setup">unnamed</span>'}
+      </div>
       <span class="path-chip">
         <div class="path">${esc(shortenPath(s.path))}</div>
         <button class="path-copy-btn" data-full="${esc(s.path)}"

@@ -2,6 +2,14 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.8.0] — 2026-07-27
+
+### Added
+
+- **`configure(project=...)`** — stamp a project name onto every trace from one call at application startup. The name is stamped onto all root and child traces automatically; a per-trace `project=` argument still overrides it. Traces written without a project name emit a `UserWarning` pointing to this parameter.
+- **Viewer: source names read from trace data.** When a source's trace records carry a `project` field, the viewer uses that value as the source name instead of deriving one from the file path. Stable across file moves and works identically for JSONL, SQLite, and future HTTP sources. Sources without a project field show an `unnamed` badge in the source picker — a visible prompt to set `configure(project=...)` rather than a silent fallback.
+- **`reset_config()` now clears the trace buffer.** Buffered traces from one test no longer leak into the next test's buffer state.
+
 ## [0.7.0] — 2026-07-27
 
 ### Changed

@@ -149,12 +149,14 @@ class TraceConfig:
 _package_config: Optional[TraceConfig] = None
 _package_budget: Any = None          # Optional[TraceBudget] — typed as Any to avoid circular import
 _package_sinks: List[Any] = []       # List[Sink]
+_package_project: Optional[str] = None  # set via configure(project=...); stamped onto every trace
 
 
 def configure(
     config: Optional[TraceConfig] = None,
     budget: Any = None,
     sinks: Optional[List[Any]] = None,
+    project: Optional[str] = None,
 ) -> None:
     """
     Set package-wide defaults for all future traces.
@@ -163,20 +165,25 @@ def configure(
     baseline for every trace unless a specific trace or decorator overrides them.
 
     Args:
-        config:  A TraceConfig instance. Only non-None fields are applied; the
-                 rest keep their current values (or package defaults).
-        budget:  A TraceBudget instance. Only non-None fields are applied.
-        sinks:   A list of sink objects (JsonlSink, ConsoleSink, etc.). Replaces
-                 the current sink list entirely.
+        config:   A TraceConfig instance. Only non-None fields are applied; the
+                  rest keep their current values (or package defaults).
+        budget:   A TraceBudget instance. Only non-None fields are applied.
+        sinks:    A list of sink objects (JsonlSink, ConsoleSink, etc.). Replaces
+                  the current sink list entirely.
+        project:  The application or project name. Stamped onto every trace so
+                  the viewer can label sources by their project rather than by
+                  the sink's file path. Required in practice — traces written
+                  without a project name emit a warning.
 
     Example:
         configure(
+            project="my-app",
             config=TraceConfig(enabled=True, sink_mode="buffered"),
             budget=TraceBudget(max_events=200),
             sinks=[JsonlSink("traces.jsonl")],
         )
     """
-    global _package_config, _package_budget, _package_sinks
+    global _package_config, _package_budget, _package_sinks, _package_project
 
     if config is not None:
         _package_config = config
@@ -186,6 +193,9 @@ def configure(
 
     if sinks is not None:
         _package_sinks = list(sinks)
+
+    if project is not None:
+        _package_project = project
 
 
 def reset_config() -> None:
@@ -207,11 +217,18 @@ def reset_config() -> None:
         - Traces that have already been written to a sink. Those are gone.
         - Files on disk. JsonlSink output is not deleted.
     """
-    global _package_config, _package_budget, _package_sinks
+    global _package_config, _package_budget, _package_sinks, _package_project
 
     _package_config = None
     _package_budget = None
     _package_sinks = []
+    _package_project = None
+
+    # Discard any buffered records so one test's buffered traces cannot leak
+    # into the next test's buffer state. Imported here to avoid a circular
+    # import at module load time (sinks.py does not import config.py).
+    from traceact.sinks import reset_buffer
+    reset_buffer()
 
     # Clear the active trace context so tests start with a clean slate.
     # The deferred import avoids a circular dependency at module load time
@@ -244,3 +261,8 @@ def get_package_budget() -> Any:
 def get_package_sinks() -> List[Any]:
     """Return the current list of configured sinks."""
     return _package_sinks
+
+
+def get_package_project() -> Optional[str]:
+    """Return the package-level project name, or None if not set."""
+    return _package_project

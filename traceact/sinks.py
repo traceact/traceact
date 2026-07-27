@@ -76,6 +76,21 @@ def _ensure_flush_registered() -> None:
         _flush_registered = True
 
 
+def reset_buffer() -> None:
+    """
+    Discard all buffered records and reset the atexit flush registration.
+
+    Call this in test teardown (via reset_config()) to prevent one test's
+    buffered traces from leaking into the next test's buffer state. Not
+    intended for production use — buffered records not yet flushed to a sink
+    are silently discarded.
+    """
+    global _flush_registered
+    with _buffer_lock:
+        _buffer.clear()
+    _flush_registered = False
+
+
 def buffer_record(record: Dict[str, Any]) -> None:
     """
     Add a finished trace record to the in-memory buffer.

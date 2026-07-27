@@ -94,6 +94,7 @@ Call `configure()` once at application startup before any traces run.
 from traceact import configure, TraceConfig, TraceBudget, JsonlSink, ConsoleSink
 
 configure(
+    project="my-app",           # stamps every trace; viewer uses this as the source name
     config=TraceConfig(
         enabled=True,
         sink_mode="blocking",   # "blocking" | "buffered" | "disabled"
@@ -118,6 +119,8 @@ configure(
 ```
 
 All fields are optional. Omitted fields use package defaults. `configure()` can be called multiple times; later calls replace earlier ones.
+
+**`project`** is the recommended way to name your traces. It is stamped onto every trace produced by this process and used by the viewer to label the source. Traces written without a `project` emit a `UserWarning` at runtime. A per-trace `project=` argument on `@traced_action` or `ActionTrace.start()` overrides the package-level value for that trace only.
 
 **Sink modes:**
 - `"blocking"` — write immediately when a trace finishes. Best for development.

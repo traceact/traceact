@@ -375,3 +375,87 @@ class TestPrivateInstanceStateGating:
         rc, _, clear_state = self._run_view(["view", "--no-browser"], monkeypatch)
         assert rc == 0
         assert clear_state.called
+
+
+# ---------------------------------------------------------------------------
+# Project-field-based source naming
+# ---------------------------------------------------------------------------
+#
+# When a source contains trace records with a non-null project field, the
+# viewer uses that value as the source name rather than deriving it from the
+# file path. This keeps the name stable even if the file is moved, and works
+# identically for JSONL, SQLite, and future HTTP sources.
+
+import json as _json  # already imported above, but named alias avoids shadowing
+
+
+class TestProjectFieldNaming:
+    def _write_traces(self, path, records):
+        with open(path, "w", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(_json.dumps(r) + "\n")
+
+    def test_project_field_used_as_source_name(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        self._write_traces(f, [{"project": "agora", "action": "test"}])
+        state = ViewerState()
+        name = state.add_source(str(f))
+        assert name == "agora"
+
+    def test_project_name_marked_as_named(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        self._write_traces(f, [{"project": "agora", "action": "test"}])
+        state = ViewerState()
+        name = state.add_source(str(f))
+        assert state.source_named[name] is True
+
+    def test_path_derived_name_marked_as_unnamed(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        state = ViewerState()
+        name = state.add_source(str(f))
+        assert state.source_named[name] is False
+
+    def test_empty_source_falls_back_to_path(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text("")
+        # Empty file has no project — must not crash and must produce a name.
+        state = ViewerState()
+        name = state.add_source(str(f))
+        assert name  # non-empty
+
+    def test_null_project_falls_back_to_path(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        self._write_traces(f, [{"project": None, "action": "test"}])
+        state = ViewerState()
+        name = state.add_source(str(f))
+        # null project is treated the same as absent — path derivation runs.
+        assert state.source_named[name] is False
+
+    def test_explicit_name_param_beats_project_field(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        self._write_traces(f, [{"project": "agora", "action": "test"}])
+        state = ViewerState()
+        name = state.add_source(str(f), name="override")
+        assert name == "override"
+        assert state.source_named[name] is True
+
+    def test_directory_source_reads_project_from_first_file(self, tmp_path):
+        (tmp_path / "a.jsonl").write_text(
+            _json.dumps({"project": "myapp", "action": "x"}) + "\n"
+        )
+        state = ViewerState()
+        name = state.add_source(str(tmp_path))
+        assert name == "myapp"
+        assert state.source_named[name] is True
+
+    def test_collision_suffix_applied_to_project_name(self, tmp_path):
+        f1 = tmp_path / "a.jsonl"
+        f2 = tmp_path / "b.jsonl"
+        self._write_traces(f1, [{"project": "agora"}])
+        self._write_traces(f2, [{"project": "agora"}])
+        state = ViewerState()
+        n1 = state.add_source(str(f1))
+        n2 = state.add_source(str(f2))
+        assert n1 == "agora"
+        assert n2 == "agora-2"
