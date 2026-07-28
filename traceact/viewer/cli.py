@@ -30,7 +30,7 @@ import webbrowser
 from typing import Optional
 
 from traceact.viewer import doctor as _doctor
-from traceact.viewer.server import ViewerServer, ViewerState
+from traceact.viewer.server import ViewerServer, ViewerState, _normalise_base_path
 import traceact.viewer.instance as _instance
 
 _DEFAULT_PORT = 8765
@@ -91,6 +91,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--new", action="store_true",
         help="Force a new viewer instance even if one is already running.",
     )
+    view.add_argument(
+        "--base-path", default="",
+        help="Serve every route under a path prefix (e.g. /audit-viewer) so "
+             "the viewer can sit behind another app's reverse proxy. Defaults "
+             "to the root.",
+    )
     view.set_defaults(handler=_run_view)
 
     doctor = subparsers.add_parser(
@@ -127,13 +133,19 @@ def _run_view(args: argparse.Namespace) -> int:
       - no existing viewer is responding (stale state file)
     """
     user_chose_port = (args.port != _DEFAULT_PORT)
+    # Normalised here so the printed URL, the state file, and the server all
+    # agree on one spelling of the prefix.
+    base_path = _normalise_base_path(getattr(args, "base_path", ""))
 
     if not args.new and not user_chose_port:
         existing = _instance.find_running()
         if existing is not None:
             host, port = existing["host"], existing["port"]
+            # A running viewer's own prefix, which may differ from this call's.
+            running_base = existing.get("base_path", "")
             if args.source is not None:
-                added = _instance.add_source_to(host, port, args.source)
+                added = _instance.add_source_to(host, port, args.source,
+                                                base_path=running_base)
                 if added:
                     print(f"Added source '{added['name']}' to running viewer.")
                 else:
@@ -142,7 +154,7 @@ def _run_view(args: argparse.Namespace) -> int:
                         "The server may have restarted.",
                         file=sys.stderr,
                     )
-            url = f"http://{host}:{port}/"
+            url = f"http://{host}:{port}{running_base}/"
             print(f"Reusing existing viewer at {url}")
             if not args.no_browser:
                 webbrowser.open(url)
@@ -154,7 +166,8 @@ def _run_view(args: argparse.Namespace) -> int:
         name = state.add_source(args.source)
         print(f"Loaded source '{name}' → {state.sources[name]}")
 
-    server, port = _start_server(args.host, args.port, state)
+    server, port = _start_server(args.host, args.port, state,
+                                 base_path=base_path)
     if server is None:
         print(
             f"Could not bind a port near {args.port}. "
@@ -163,7 +176,7 @@ def _run_view(args: argparse.Namespace) -> int:
         )
         return 1
 
-    url = f"http://{args.host}:{port}/"
+    url = f"http://{args.host}:{port}{base_path}/"
     print(f"TraceAct viewer running at {url}")
     print("Press Ctrl+C to stop.")
 
@@ -174,7 +187,7 @@ def _run_view(args: argparse.Namespace) -> int:
     # that app's traces would be POSTed here and it would open a viewer
     # showing this one's source instead of its own.
     if not args.new and not user_chose_port:
-        _instance.write_state(args.host, port)
+        _instance.write_state(args.host, port, base_path=base_path)
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -225,14 +238,15 @@ def _run_doctor(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 1
 
 
-def _start_server(host: str, port: int, state: ViewerState):
+def _start_server(host: str, port: int, state: ViewerState,
+                  base_path: str = ""):
     """
     Try to bind the requested port, incrementing a few times if it's in use.
     Returns (server, actual_port) or (None, port) if no nearby port was free.
     """
     for candidate in range(port, port + 20):
         try:
-            server = ViewerServer(host, candidate, state)
+            server = ViewerServer(host, candidate, state, base_path=base_path)
             return server, candidate
         except OSError:
             # Port in use; try the next one.

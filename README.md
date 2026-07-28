@@ -75,6 +75,7 @@ traceact show [SOURCE] ...   # identical alias of view
 | `--host HOST` | `127.0.0.1` | Interface to bind (localhost only by default) |
 | `--no-browser` | off | Start the server without opening a browser tab |
 | `--new` | off | Force a fresh instance even if one is already running |
+| `--base-path PATH` | *(none)* | Mount at a subpath for reverse-proxy deployments |
 
 ### Port selection
 

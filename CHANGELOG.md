@@ -2,6 +2,18 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.9.0] — 2026-07-28
+
+### Added
+
+- **Viewer: `--base-path` / `base_path=` for reverse-proxy mounting.** The viewer can now sit at a subpath inside an existing app's web server (e.g. `/audit-viewer`) rather than requiring a second port. Pass `--base-path /audit-viewer` on the CLI or `base_path="/audit-viewer"` to `launch_or_connect()`. All routes and static-asset URLs are prefixed automatically; the host app's own routes at `/` are left untouched. Works for any depth (`/tools/audit`), handles every reasonable spelling (`audit-viewer`, `/audit-viewer`, `/audit-viewer/`) identically, and maintains single-instance coordination correctly when multiple processes share the same mount.
+
+- **`GET /api/export?source=<name>` — full-source JSONL download.** Returns all trace records for a registered source as an `application/x-ndjson` attachment. Single-file sources are streamed byte-identical (no parsing, no reordering) with a `Content-Length` header. Folder sources merge segments chronologically via `heapq.merge` keyed on `started_at`, the same ordering the viewer displays — malformed or unparseable lines are preserved verbatim rather than silently dropped, blank lines are the only thing removed. Use it to snapshot a running source, export from a remote deployment, or hand trace data to someone who can't reach the viewer's port directly.
+
+- **Viewer: export button in the source picker.** Each source row in the source picker modal now has a `⤓` download button (revealed on hover). Clicking it triggers the `/api/export` endpoint and downloads the source as a `.jsonl` file. The button briefly highlights after the click to confirm the download started. Useful during a live run, though the download captures only what the source has written so far — traces written after the request starts aren't included.
+
+- **Viewer: browser tab title includes the active source name.** The page title is now `TraceAct · <sourceName>` when a source is selected and `TraceAct` when none is. All instances still start with `TraceAct`, so typing the tool name matches every open viewer in the browser's address bar — and the source name after the separator makes each instance distinguishable rather than showing only the port.
+
 ## [0.8.1] — 2026-07-27
 
 ### Added

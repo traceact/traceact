@@ -30,12 +30,20 @@ _STATE_DIR = os.path.expanduser("~/.traceact")
 _STATE_FILE = os.path.join(_STATE_DIR, "viewer.json")
 
 
-def write_state(host: str, port: int) -> None:
-    """Record the running viewer's location so later launches can find it."""
+def write_state(host: str, port: int, base_path: str = "") -> None:
+    """
+    Record the running viewer's location so later launches can find it.
+
+    ``base_path`` is stored alongside host and port because a viewer mounted
+    under a prefix answers nothing at the root: a later launch that probed
+    ``/api/health`` without the prefix would read the live viewer as dead and
+    spawn a duplicate on the next port.
+    """
     try:
         os.makedirs(_STATE_DIR, exist_ok=True)
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"host": host, "port": port, "pid": os.getpid()}, f)
+            json.dump({"host": host, "port": port, "pid": os.getpid(),
+                       "base_path": base_path}, f)
     except OSError:
         # Not being able to write the state file is non-fatal; it just means
         # single-instance reuse won't kick in. The viewer still runs.
@@ -58,12 +66,16 @@ def _read_state() -> Optional[Dict[str, Any]]:
         return None
 
 
-def probe(host: str, port: int, timeout: float = 0.5) -> Optional[dict]:
+def probe(host: str, port: int, timeout: float = 0.5,
+          base_path: str = "") -> Optional[dict]:
     """
     Ask a candidate viewer whether it is alive. Returns its health payload
     (which includes the version and source count) or None if nothing answers.
+
+    ``base_path`` must match the prefix the viewer was started under; a
+    mounted viewer serves nothing at the root.
     """
-    url = f"http://{host}:{port}/api/health"
+    url = f"http://{host}:{port}{base_path}/api/health"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             if resp.status == 200:
@@ -75,8 +87,12 @@ def probe(host: str, port: int, timeout: float = 0.5) -> Optional[dict]:
 
 def find_running() -> Optional[Dict[str, Any]]:
     """
-    Return {host, port, health} for a live viewer recorded in the state file,
-    or None if there is no record or the recorded viewer is not responding.
+    Return {host, port, base_path, health} for a live viewer recorded in the
+    state file, or None if there is no record or the recorded viewer is not
+    responding.
+
+    ``base_path`` is "" for a viewer serving at the root, which is both the
+    default and what every state file written before this key existed implies.
     """
     state = _read_state()
     if not state:
@@ -84,10 +100,12 @@ def find_running() -> Optional[Dict[str, Any]]:
     host, port = state.get("host"), state.get("port")
     if not host or not port:
         return None
-    health = probe(host, port)
+    base_path = state.get("base_path") or ""
+    health = probe(host, port, base_path=base_path)
     if health is None:
         return None
-    return {"host": host, "port": port, "health": health}
+    return {"host": host, "port": port, "base_path": base_path,
+            "health": health}
 
 
 def launch_or_connect(
@@ -97,6 +115,7 @@ def launch_or_connect(
     open_browser: bool = False,
     timeout: float = 3.0,
     name: Optional[str] = None,
+    base_path: str = "",
 ) -> str:
     """
     Ensure a viewer is running and return its URL.  Designed to be called from
@@ -135,26 +154,46 @@ def launch_or_connect(
     sit::
 
         launch_or_connect(source="data/traces/traces.jsonl", name="agora")
+
+    ``base_path`` mounts the viewer under a path prefix instead of the root,
+    so an app can reverse-proxy it on its own port, behind its own auth,
+    rather than exposing a second one::
+
+        launch_or_connect(source="data/traces.jsonl", base_path="/audit-viewer")
+
+    The returned URL includes the prefix. Note that a viewer already running
+    at a *different* prefix is reused as it stands: the prefix is fixed when a
+    server starts, so this argument only takes effect on the launch that
+    actually spawns one. The returned URL always reflects where the viewer
+    answering the call really lives.
     """
     import subprocess
     import sys
     import time
     from urllib.parse import quote
 
+    from traceact.viewer.server import _normalise_base_path
+    base_path = _normalise_base_path(base_path)
+
     existing = find_running()
     if existing is not None:
         h, p = existing["host"], existing["port"]
+        # The running viewer's own prefix wins: it is already bound and
+        # serving there, whatever this caller asked for.
+        b = existing.get("base_path", "")
         if source is not None:
-            added = add_source_to(h, p, source, name=name)
+            added = add_source_to(h, p, source, name=name, base_path=b)
             if added and added.get("name"):
-                return f"http://{h}:{p}/?source={quote(added['name'], safe='')}"
-        return f"http://{h}:{p}/"
+                return f"http://{h}:{p}{b}/?source={quote(added['name'], safe='')}"
+        return f"http://{h}:{p}{b}/"
 
     # Not running — start one in the background. A source is seeded on the
     # command line only when no explicit name was given: the CLI path derives
     # its own name, so a named source is added over HTTP once the server is up.
     cmd = [sys.executable, "-m", "traceact.viewer.cli", "view", "--no-browser",
            "--host", host, "--port", str(port)]
+    if base_path:
+        cmd += ["--base-path", base_path]
     if source is not None and name is None:
         cmd.append(source)
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -162,7 +201,7 @@ def launch_or_connect(
     # Wait for it to be ready (polls health endpoint).
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if probe(host, port) is not None:
+        if probe(host, port, base_path=base_path) is not None:
             break
         time.sleep(0.1)
 
@@ -172,18 +211,20 @@ def launch_or_connect(
     # is opened.
     if source is not None:
         if name is not None:
-            added = add_source_to(host, port, source, name=name)
+            added = add_source_to(host, port, source, name=name,
+                                  base_path=base_path)
             if added and added.get("name"):
-                return f"http://{host}:{port}/?source={quote(added['name'], safe='')}"
-        names = list_source_names(host, port)
+                return f"http://{host}:{port}{base_path}/?source={quote(added['name'], safe='')}"
+        names = list_source_names(host, port, base_path=base_path)
         if names:
-            return f"http://{host}:{port}/?source={quote(names[0], safe='')}"
-    return f"http://{host}:{port}/"
+            return f"http://{host}:{port}{base_path}/?source={quote(names[0], safe='')}"
+    return f"http://{host}:{port}{base_path}/"
 
 
 def add_source_to(host: str, port: int, path: str,
                   timeout: float = 1.0,
-                  name: Optional[str] = None) -> Optional[dict]:
+                  name: Optional[str] = None,
+                  base_path: str = "") -> Optional[dict]:
     """
     Ask an already-running viewer to add a source. Returns the created source
     ({name, path}) or None on failure.
@@ -191,8 +232,10 @@ def add_source_to(host: str, port: int, path: str,
     ``name`` labels the source explicitly; without it the viewer derives one
     from the path. Note the viewer dedupes by path, so a path it already knows
     keeps the name it was first registered under.
+
+    ``base_path`` must match the prefix the target viewer serves under.
     """
-    url = f"http://{host}:{port}/api/sources"
+    url = f"http://{host}:{port}{base_path}/api/sources"
     payload = {"path": path}
     if name is not None:
         payload["name"] = name
@@ -209,12 +252,15 @@ def add_source_to(host: str, port: int, path: str,
 
 
 def list_source_names(host: str, port: int,
-                      timeout: float = 1.0) -> list:
+                      timeout: float = 1.0,
+                      base_path: str = "") -> list:
     """
     Return the names of the sources registered with a running viewer, in the
     order the viewer reports them. Empty list on any failure.
+
+    ``base_path`` must match the prefix the target viewer serves under.
     """
-    url = f"http://{host}:{port}/api/sources"
+    url = f"http://{host}:{port}{base_path}/api/sources"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             sources = json.loads(resp.read().decode("utf-8"))

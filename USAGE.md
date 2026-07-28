@@ -1296,6 +1296,7 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 | `--host HOST` | `127.0.0.1` | Interface to bind. Localhost only by default. |
 | `--no-browser` | off | Start the server without opening a browser tab. |
 | `--new` | off | Force a new viewer instance even if one is already running. |
+| `--base-path PATH` | *(none)* | Mount the viewer at a subpath (e.g. `/audit-viewer`) for reverse-proxy deployments. |
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
 
@@ -1360,6 +1361,7 @@ The Terminal window stays open so Ctrl+C stops the viewer. To pass a source file
 - **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target, against the currently tailed rows. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view. A pre-filtered view opened via `TraceLog.view()` instead searches the full source on disk — see [Server-side search](#server-side-search-apiquery) below.
 - **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
 - **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play. The map zooms and pans: the mouse wheel zooms about the cursor, left-drag pans, and the `+` / `−` / `⟲` buttons zoom about the centre and reset to 1×. Zoom is clamped to 0.2×–5× and resets when you select a different trace.
+- **Source export** — each source row in the source picker shows a `⤓` button on hover. Clicking it downloads the full source as a `.jsonl` file via `/api/export`. The download is a snapshot as of the moment the request is made; traces written after it are not included.
 - **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
 
 ### Run diagnostics (Settings)
@@ -1380,6 +1382,11 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | `POST` | `/api/import` | `{"name":"file.jsonl","content":"..."}` | `{"name":"...","path":"...","imported":true}` |
 | `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
 | `GET` | `/api/query?source=NAME&field[__op]=value&limit=N` | — | `{"traces":[...],"scan_capped":bool,"limit_reached":bool,"count":N}` |
+| `GET` | `/api/export?source=NAME` | — | `.jsonl` file download (`application/x-ndjson`) |
+
+`/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path cannot be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
+
+When the viewer is mounted at a `base_path`, all endpoints above are served under that prefix (e.g. `/audit-viewer/api/export`). Requests at the unprefixed paths return 404.
 
 `/api/doctor`'s `status` is `"pass"`, `"fail"`, or `"info"`; `hint` is present only on `"fail"` checks. `ok` is `true` only if every `"pass"`/`"fail"` check passed — `"info"` checks (traceact's version, whether a viewer is running) never affect it.
 
@@ -1451,8 +1458,11 @@ launch_or_connect(
     open_browser=False,
     timeout=3.0,      # seconds to wait for a freshly started server to be ready
     name=None,        # label for this source in the picker; derived from the path if unset
+    base_path="",     # subpath to mount under, e.g. "/audit-viewer" (default: root)
 ) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/?source=agora"
 ```
+
+Pass `base_path` when the viewer sits behind a reverse proxy at a subpath instead of at the server root. The same value must be passed on every call for a given viewer instance — when reusing a running viewer, `launch_or_connect` reads the stored `base_path` from the state file and uses it for all subsequent API calls.
 
 ### How sources are named
 

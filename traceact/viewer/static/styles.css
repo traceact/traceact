@@ -220,6 +220,25 @@ body {
 .path-copy-btn.copied { opacity: 1; pointer-events: none; color: var(--accent); }
 .path-copy-btn.copy-failed { opacity: 1; pointer-events: none; color: var(--status-failed); }
 
+/* Export sits next to the copy button and reveals on the same hover, so a
+   source row shows no controls until it's the one being pointed at. */
+.path-export-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.path-chip:hover .path-export-btn { opacity: 1; pointer-events: auto; }
+.path-export-btn:hover { color: var(--accent); background: var(--bg-hover); }
+.path-export-btn.exported { opacity: 1; color: var(--accent); }
+
 .tabs { display: flex; gap: 22px; }
 
 .tabs button {

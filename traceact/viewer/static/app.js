@@ -16,6 +16,17 @@
  *   prepend on append, capping the list at the configured row limit so the page
  *   never grows unbounded no matter how busy the source is. */
 
+/* Where the server is mounted. A viewer served under a path prefix (so it can
+ * sit behind an existing app's proxy) declares the prefix on the page; served
+ * at the root, the global is absent and every URL below stays exactly as it
+ * was. Every request the app makes goes through api() so a mounted viewer's
+ * calls can't escape its own mount and hit the host app instead. */
+const API_BASE = (typeof window !== "undefined" && window.__TRACEACT_BASE__) || "";
+
+function api(path) {
+  return API_BASE + path;
+}
+
 const state = {
   sources: [],            // [{name, path, named}] — named=false means project field was absent
   currentSource: null,    // source name currently streamed
@@ -60,6 +71,8 @@ function init() {
 
   refreshSources().then(() => {
     if (state.sources.length === 0) {
+      // Nothing to name the tab after yet; stays the bare tool name.
+      setPageTitle(null);
       renderLog();
       return;
     }
@@ -75,11 +88,29 @@ function init() {
   });
 }
 
+/* ---- Page title ------------------------------------------------------- */
+//
+// The port a viewer answers on moves around: 8765 auto-increments when it's
+// taken, --new picks another, and every restart can land somewhere different.
+// That makes the port a poor way to tell one viewer from another in browser
+// history or an address-bar autocomplete, where several instances otherwise
+// pile up as identical "TraceAct" entries.
+//
+// The source name doesn't move, so the title carries it. "TraceAct" stays the
+// first word, so typing the tool's name still matches every instance, and the
+// source name after it distinguishes them: "TraceAct · casewright".
+
+const BASE_TITLE = "TraceAct";
+
+function setPageTitle(sourceName) {
+  document.title = sourceName ? `${BASE_TITLE} · ${sourceName}` : BASE_TITLE;
+}
+
 /* ---- Version badge ---------------------------------------------------- */
 
 async function loadVersion() {
   try {
-    const res = await fetch("/api/health");
+    const res = await fetch(api("/api/health"));
     const data = await res.json();
     if (data && data.version) {
       document.getElementById("version-badge").textContent = `v${data.version}`;
@@ -93,7 +124,7 @@ async function loadVersion() {
 
 async function refreshSources() {
   try {
-    const res = await fetch("/api/sources");
+    const res = await fetch(api("/api/sources"));
     state.sources = await res.json();
   } catch (e) {
     state.sources = [];
@@ -104,7 +135,7 @@ async function refreshSources() {
 async function addSource(path) {
   if (!path || !path.trim()) return;
   try {
-    const res = await fetch("/api/sources", {
+    const res = await fetch(api("/api/sources"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: path.trim() }),
@@ -135,6 +166,7 @@ function selectSource(name) {
   document.getElementById("source-name").classList.remove("muted");
   document.getElementById("source-path").textContent = shortenPath(source.path);
   document.getElementById("source-picker").classList.remove("empty");
+  setPageTitle(source.name);
 
   const copyBtn = document.getElementById("source-path-copy");
   copyBtn.dataset.full = source.path;
@@ -155,7 +187,7 @@ function selectSource(name) {
 function openStream(name) {
   if (state.stream) state.stream.close();
 
-  const url = `/api/stream?source=${encodeURIComponent(name)}&limit=${state.settings.limit}`;
+  const url = api(`/api/stream?source=${encodeURIComponent(name)}&limit=${state.settings.limit}`);
   const es = new EventSource(url);
   state.stream = es;
 
@@ -840,7 +872,7 @@ async function runPreFilterQuery(sourceName) {
 
   let data;
   try {
-    const res = await fetch(`/api/query?${params.toString()}`);
+    const res = await fetch(api(`/api/query?${params.toString()}`));
     if (!res.ok) return; // fall back silently to whatever the tail buffer has
     data = await res.json();
   } catch (e) {
@@ -1055,7 +1087,7 @@ async function runDoctor() {
     const params = state.currentSource
       ? `?source=${encodeURIComponent(state.sources.find((s) => s.name === state.currentSource)?.path || "")}`
       : "";
-    const res = await fetch(`/api/doctor${params}`);
+    const res = await fetch(api(`/api/doctor${params}`));
     data = await res.json();
   } catch (e) {
     progress.hidden = true;
@@ -1152,7 +1184,7 @@ function wireModal() {
 async function pickSource(type) {
   setDropStatus(type === "folder" ? "Opening folder picker…" : "Opening file picker…");
   try {
-    const resp = await fetch(`/api/pick?type=${type}`);
+    const resp = await fetch(api(`/api/pick?type=${type}`));
     const data = await resp.json();
     if (data.cancelled || !data.path) {
       setDropStatus("");
@@ -1175,7 +1207,7 @@ async function importDroppedFile(file) {
   setDropStatus(`Importing ${file.name}…`);
   const content = await file.text();
   try {
-    const resp = await fetch("/api/import", {
+    const resp = await fetch(api("/api/import"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: file.name, content, label: file.name.replace(".jsonl", "") }),
@@ -1235,12 +1267,16 @@ function renderSourceList() {
         <div class="path">${esc(shortenPath(s.path))}</div>
         <button class="path-copy-btn" data-full="${esc(s.path)}"
                 title="Copy full path" aria-label="Copy full path">⧉</button>
+        <button class="path-export-btn" data-source="${esc(s.name)}"
+                title="Download this source as .jsonl — a snapshot as of now, so traces written after it aren't included"
+                aria-label="Download this source as .jsonl">⤓</button>
       </span>
     </div>`).join("");
   list.querySelectorAll(".source-option").forEach((row) => {
     row.addEventListener("click", () => { selectSource(row.dataset.name); closeModal(); });
   });
   wireCopyButtons(list);
+  wireExportButtons(list);
 }
 
 /* ---- Path display: local paths shortened, URLs shown in full --------- */
@@ -1298,6 +1334,43 @@ function copyViaExecCommand(text) {
 // Wires every .path-copy-btn under `root` to copy its data-full value.
 // stopPropagation() matters here: in the source-list modal, the copy button
 // sits inside a row that has its own click handler (select this source).
+/* ---- Source export --------------------------------------------------- */
+//
+// Downloads a whole source as .jsonl via /api/export.
+//
+// What the user gets is the source as it stood when the request was served.
+// An app writing hundreds of traces a minute keeps going after that point, so
+// a download is a snapshot rather than a live mirror, and re-exporting later
+// gives a longer file. The button says so in its tooltip instead of leaving
+// someone to work it out from a trace count that doesn't match the viewer.
+
+function exportSource(name) {
+  const a = document.createElement("a");
+  a.href = api(`/api/export?source=${encodeURIComponent(name)}`);
+  // The server's Content-Disposition names the file and keeps this page
+  // loaded. download= only matters if that header is stripped by a proxy the
+  // viewer is mounted behind, which is the deployment this endpoint is for.
+  a.download = `${name}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function wireExportButtons(root) {
+  root.querySelectorAll(".path-export-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      // The whole row selects a source and closes the modal; exporting must
+      // do neither.
+      e.stopPropagation();
+      const name = btn.dataset.source;
+      if (!name) return;
+      exportSource(name);
+      btn.classList.add("exported");
+      setTimeout(() => btn.classList.remove("exported"), 1200);
+    });
+  });
+}
+
 function wireCopyButtons(root) {
   root.querySelectorAll(".path-copy-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {

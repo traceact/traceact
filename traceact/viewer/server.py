@@ -15,6 +15,15 @@
 #   GET  /api/stream?source=&limit=   Server-Sent Events: snapshot then live tail
 #   GET  /api/query?source=&<field>[__op]=&limit=   search the full source via
 #        TraceLog, not just the live-tailed buffer (see _serve_query)
+#   GET  /api/export?source=<name>    the whole source as a .jsonl download
+#
+# Serving under a path prefix:
+# Every route above is relative to the server's base path, which is "" (the
+# root) by default. Set it and the same routes move wholesale: base path
+# "/audit-viewer" serves the app at /audit-viewer/ and the API under
+# /audit-viewer/api/... . This exists so the viewer can sit behind an existing
+# app's reverse proxy on one port, under that app's own auth, instead of
+# exposing a second port. See _normalise_base_path and _Handler._strip_base.
 #
 # Why SSE and not WebSockets:
 # The data flow is one-directional — the server pushes traces to the browser and
@@ -35,13 +44,16 @@
 # SSE connection never blocks other requests (static files, adding a source,
 # a second stream). Threads are daemons so the process can exit cleanly.
 
+import heapq
 import json
 import os
+import re
+import shutil
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from traceact import __version__
@@ -96,6 +108,34 @@ _QUERY_MAX_LIMIT = 1000
 # scan_capped=True result, bounding a single request's worst-case cost
 # regardless of source size.
 _QUERY_MAX_LINES_SCANNED = 200_000
+
+# /api/export — characters kept in a download filename. Source names come from
+# project names and derived paths, so they can carry spaces, slashes, or quotes,
+# none of which belong unescaped in a Content-Disposition header.
+_EXPORT_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+# The JS global the served index.html declares so app.js knows what to prefix
+# its API calls with. Declared only when a base path is configured; app.js
+# treats its absence as "serve from root", which is the default.
+_BASE_PATH_GLOBAL = "__TRACEACT_BASE__"
+
+
+def _normalise_base_path(base_path: Optional[str]) -> str:
+    """
+    Reduce a caller-supplied base path to the one canonical form used
+    internally: either "" (serve at the root, the default) or
+    "/segment[/segment...]" with no trailing slash.
+
+    Accepts the spellings people reach for interchangeably, so
+    "audit-viewer", "/audit-viewer", "/audit-viewer/" and "  /audit-viewer  "
+    all normalise to "/audit-viewer". "" , "/" and None all mean the root.
+    """
+    if not base_path:
+        return ""
+    cleaned = base_path.strip().strip("/")
+    if not cleaned:
+        return ""
+    return "/" + cleaned
 
 
 class ViewerState:
@@ -173,9 +213,40 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routing -----------------------------------------------------------
 
+    def _base_path(self) -> str:
+        """The prefix every route is served under; "" means the root."""
+        return getattr(self.server, "base_path", "")
+
+    def _strip_base(self, path: str) -> Optional[str]:
+        """
+        Remove the configured base path from a request path, returning the
+        route to dispatch on. Returns None when the request falls outside the
+        mount, which the caller turns into a 404 — with a base path set, the
+        viewer deliberately owns nothing above its own prefix, so a stray "/"
+        must not be answered with the app.
+        """
+        base = self._base_path()
+        if not base:
+            return path
+        if path == base:
+            # Bare prefix with no trailing slash. The caller redirects.
+            return ""
+        if path.startswith(base + "/"):
+            return path[len(base):]
+        return None
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        route = parsed.path
+        route = self._strip_base(parsed.path)
+
+        if route is None:
+            self._send_error(404, "Not found")
+            return
+        if route == "":
+            # "/audit-viewer" → "/audit-viewer/", so the app always loads from
+            # a URL ending in a slash.
+            self._redirect(self._base_path() + "/")
+            return
 
         if route == "/":
             self._serve_static("index.html")
@@ -193,17 +264,26 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_stream(parse_qs(parsed.query))
         elif route == "/api/query":
             self._serve_query(parse_qs(parsed.query))
+        elif route == "/api/export":
+            self._serve_export(parse_qs(parsed.query))
         else:
             self._send_error(404, "Not found")
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/sources":
+        route = self._strip_base(parsed.path)
+        if route == "/api/sources":
             self._add_source()
-        elif parsed.path == "/api/import":
+        elif route == "/api/import":
             self._import_file()
         else:
             self._send_error(404, "Not found")
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(301)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     # -- static files ------------------------------------------------------
 
@@ -222,6 +302,11 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             self._send_error(500, "Could not read file")
             return
+        # Only index.html carries absolute asset URLs, and only a mounted
+        # viewer needs them moved. At the default root the file is served
+        # byte-for-byte as it ships.
+        if filename == "index.html" and self._base_path():
+            body = _apply_base_path(body, self._base_path())
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -230,6 +315,84 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    # -- export ------------------------------------------------------------
+
+    def _serve_export(self, query: Dict[str, list]) -> None:
+        """
+        Send a whole source back as a .jsonl file download.
+
+        Written for deployments where the viewer's own UI can't be reached
+        from the user's browser: the host app proxies this one endpoint, the
+        user downloads their traces, and they run `traceact view` locally.
+
+        The source is addressed by its registered *name*, never by a path from
+        the query string, so this endpoint can't be steered at arbitrary files
+        on disk.
+        """
+        name = _first(query.get("source"))
+        if not name:
+            self._send_json(400, {"error": "expected ?source=<name>"})
+            return
+
+        state = self.server.state  # type: ignore[attr-defined]
+        path = state.sources.get(name)
+        if path is None:
+            self._send_json(404, {"error": "unknown source", "source": name})
+            return
+
+        from traceact.viewer.reader import _jsonl_files
+        files = _jsonl_files(path)
+        download_name = _export_filename(name)
+
+        # A single file is streamed verbatim: no parsing, nothing reordered, so
+        # the download is byte-identical to what the app wrote and the length
+        # is known up front.
+        if len(files) == 1:
+            self._export_one_file(files[0], download_name)
+            return
+
+        # A folder of segments has to be merged, and an empty source has
+        # nothing to send. Both take the streaming path.
+        self._export_merged(files, download_name)
+
+    def _export_headers(self, download_name: str,
+                        content_length: Optional[int] = None) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{download_name}"'
+        )
+        if content_length is not None:
+            self.send_header("Content-Length", str(content_length))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _export_one_file(self, filepath: str, download_name: str) -> None:
+        try:
+            size = os.path.getsize(filepath)
+            handle = open(filepath, "rb")
+        except OSError:
+            self._send_json(500, {"error": "could not read source"})
+            return
+        self._export_headers(download_name, content_length=size)
+        try:
+            with handle:
+                shutil.copyfileobj(handle, self.wfile)
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            # The browser hung up mid-download. Headers are already sent, so
+            # there is no status left to change; just stop writing.
+            pass
+
+    def _export_merged(self, files: List[str], download_name: str) -> None:
+        # Length is unknown ahead of a lazy merge, so it is omitted and the
+        # body ends at connection close (HTTP/1.0, same as /api/stream).
+        self._export_headers(download_name)
+        try:
+            for line in _merged_lines(files):
+                self.wfile.write(line)
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            pass
 
     # -- health ------------------------------------------------------------
 
@@ -458,7 +621,11 @@ class ViewerServer(ThreadingHTTPServer):
     # Let the port be reused immediately on restart (avoids "address in use").
     allow_reuse_address = True
 
-    def __init__(self, host: str, port: int, state: ViewerState) -> None:
+    def __init__(self, host: str, port: int, state: ViewerState,
+                 base_path: str = "") -> None:
+        # Normalised once here rather than on every request, and stored so
+        # _Handler can read it off the server instance.
+        self.base_path = _normalise_base_path(base_path)
         super().__init__((host, port), _Handler)
         self.state = state
 
@@ -641,6 +808,101 @@ def _parse_query_filters(query: Dict[str, list]) -> Dict[str, Any]:
                 )
         filters[key] = _first(values)
     return filters
+
+
+def _apply_base_path(body: bytes, base: str) -> bytes:
+    """
+    Rewrite the served index.html so a mounted viewer's assets and API calls
+    resolve under `base` instead of the root.
+
+    Two edits: the absolute /static/ asset URLs gain the prefix, and a small
+    script declares the prefix as a global so app.js can prefix its own fetch
+    and EventSource URLs (which are built at runtime and so can't be rewritten
+    here). app.js treats a missing global as "root", which is what an
+    unmounted viewer serves.
+    """
+    text = body.decode("utf-8")
+    text = text.replace('href="/static/', f'href="{base}/static/')
+    text = text.replace('src="/static/', f'src="{base}/static/')
+    declaration = (
+        f'<script>window.{_BASE_PATH_GLOBAL} = '
+        f'{json.dumps(base)};</script>\n'
+    )
+    # Ahead of </head> so the global exists before any script runs, however
+    # the page's script tags are later rearranged.
+    if "</head>" in text:
+        text = text.replace("</head>", declaration + "</head>", 1)
+    else:
+        text = declaration + text
+    return text.encode("utf-8")
+
+
+def _export_filename(name: str) -> str:
+    """
+    Turn a source name into a filename safe to put in a Content-Disposition
+    header. Falls back to "traces" when a name reduces to nothing.
+    """
+    stem = _EXPORT_UNSAFE_CHARS.sub("-", name).strip("-.")
+    return f"{stem or 'traces'}.jsonl"
+
+
+def _merged_lines(files: List[str]) -> Iterator[bytes]:
+    """
+    Yield every record across `files` as newline-terminated bytes, ordered by
+    each record's started_at timestamp.
+
+    Each JSONL segment is already in append order, so the segments are merged
+    lazily rather than read into memory and sorted: peak memory is one line
+    per file, not the size of the source. That matters here because this
+    streams a whole source, which is the one request with no limit on it.
+
+    Lines that don't parse, and records with no started_at, sort first under
+    the empty-string key — the same convention SourceReader uses. They are
+    passed through rather than dropped, so an export stays a faithful copy of
+    what the app wrote.
+    """
+    streams = [_keyed_lines(path) for path in files]
+    # heapq.merge is stable for equal keys, taking from earlier iterables
+    # first, so records sharing a timestamp keep their segment order.
+    for _key, raw in heapq.merge(*streams, key=lambda item: item[0]):
+        yield raw
+
+
+def _keyed_lines(filepath: str) -> Iterator[Tuple[str, bytes]]:
+    """
+    Yield (started_at, raw_line) for each non-blank line of one JSONL file.
+
+    Blank lines are skipped: they carry no record, and dropping them keeps the
+    merged output a valid JSONL stream. Every other line is passed through as
+    written, with a trailing newline added if the file's last line lacked one
+    so segments concatenate cleanly.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                if not raw.endswith(b"\n"):
+                    raw += b"\n"
+                yield (_started_at_of(raw), raw)
+    except OSError:
+        # A segment that vanished or can't be opened is skipped, matching how
+        # SourceReader treats the same case.
+        return
+
+
+def _started_at_of(raw: bytes) -> str:
+    """
+    started_at for one raw JSONL line, or "" when the line doesn't parse or
+    carries no timestamp. ISO 8601 sorts correctly as a plain string.
+    """
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if isinstance(obj, dict):
+        return obj.get("started_at") or ""
+    return ""
 
 
 def _first(values: Optional[list]) -> Optional[str]:
