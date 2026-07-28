@@ -23,8 +23,19 @@
  * calls can't escape its own mount and hit the host app instead. */
 const API_BASE = (typeof window !== "undefined" && window.__TRACEACT_BASE__) || "";
 
+/* A token-gated server (started with --require-token) puts ?token= in the URL
+ * it opens; every API call carries it back as a query param, because two of
+ * the callers — EventSource and the export download link — can't set headers.
+ * Absent the param, the string is empty and api() adds nothing. */
+const API_TOKEN = (typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("token")) || "";
+
 function api(path) {
-  return API_BASE + path;
+  let url = API_BASE + path;
+  if (API_TOKEN) {
+    url += (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(API_TOKEN);
+  }
+  return url;
 }
 
 const state = {
@@ -76,15 +87,24 @@ function init() {
       renderLog();
       return;
     }
-    // ?source=NAME selects a specific source (set by launch_or_connect so an
-    // app opens on its OWN source, not whichever happens to be first in a
-    // viewer another app already started). Falls back to the first source
-    // when the param is absent, or names one that isn't registered here.
+    // ?source=NAME selects a specific source (set by launch_or_connect and
+    // the CLI so an app opens on its OWN source). Without it — or with a name
+    // nothing here matches — no source is attached at all: auto-attaching to
+    // whichever stream happens to be first would show a fresh session some
+    // other app's traces, which reads as a leak even though the same data is
+    // one deliberate click away in the picker. The picker opens instead, so
+    // attaching is that deliberate click.
     const requested = new URLSearchParams(window.location.search).get("source");
     const match = requested
       ? state.sources.find((s) => s.name === requested)
       : null;
-    selectSource(match ? match.name : state.sources[0].name);
+    if (match) {
+      selectSource(match.name);
+    } else {
+      setPageTitle(null);
+      renderLog();
+      openModal();
+    }
   });
 }
 
@@ -125,6 +145,18 @@ async function loadVersion() {
 async function refreshSources() {
   try {
     const res = await fetch(api("/api/sources"));
+    if (res.status === 403) {
+      // Token-gated server, and this page has no (or a wrong) token. Say so
+      // rather than presenting an empty viewer as if nothing were recorded.
+      state.sources = [];
+      const empty = document.getElementById("log-empty");
+      if (empty) {
+        empty.textContent = "This viewer requires a token. Open it from the "
+          + "URL printed at startup — it includes ?token=…";
+      }
+      renderSourceList();
+      return;
+    }
     state.sources = await res.json();
   } catch (e) {
     state.sources = [];

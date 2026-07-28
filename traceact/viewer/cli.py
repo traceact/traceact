@@ -24,6 +24,7 @@
 #   --no-browser    start the server but do not open a browser tab
 
 import argparse
+import secrets
 import sys
 import threading
 import webbrowser
@@ -97,6 +98,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "the viewer can sit behind another app's reverse proxy. Defaults "
              "to the root.",
     )
+    view.add_argument(
+        "--require-token", action="store_true",
+        help="Require a random token on every API request (printed as part "
+             "of the URL). Keeps other OS users on a shared machine out of "
+             "the viewer; your own tools pick the token up automatically. "
+             "The token is generated here, never accepted as a value — a "
+             "token on a command line would be readable in the process list.",
+    )
     view.set_defaults(handler=_run_view)
 
     doctor = subparsers.add_parser(
@@ -141,12 +150,25 @@ def _run_view(args: argparse.Namespace) -> int:
         existing = _instance.find_running()
         if existing is not None:
             host, port = existing["host"], existing["port"]
-            # A running viewer's own prefix, which may differ from this call's.
+            # A running viewer's own prefix and token, which may differ from
+            # this call's: both are fixed when a server starts, so the running
+            # instance's settings win over whatever was asked for here.
             running_base = existing.get("base_path", "")
+            running_token = existing.get("token")
+            if args.require_token and not running_token:
+                print(
+                    "Note: reusing a viewer that was started without "
+                    "--require-token; its API stays open to local callers. "
+                    "Stop it and relaunch to turn token auth on.",
+                    file=sys.stderr,
+                )
+            source_name = None
             if args.source is not None:
                 added = _instance.add_source_to(host, port, args.source,
-                                                base_path=running_base)
+                                                base_path=running_base,
+                                                token=running_token)
                 if added:
+                    source_name = added["name"]
                     print(f"Added source '{added['name']}' to running viewer.")
                 else:
                     print(
@@ -154,7 +176,12 @@ def _run_view(args: argparse.Namespace) -> int:
                         "The server may have restarted.",
                         file=sys.stderr,
                     )
-            url = f"http://{host}:{port}{running_base}/"
+            # ?source= pins the tab to the source just added. Without it the
+            # app opens on its picker rather than auto-attaching to whatever
+            # stream happens to be first — see init() in static/app.js.
+            url = _instance._viewer_url(host, port, running_base,
+                                        source=source_name,
+                                        token=running_token)
             print(f"Reusing existing viewer at {url}")
             if not args.no_browser:
                 webbrowser.open(url)
@@ -162,12 +189,17 @@ def _run_view(args: argparse.Namespace) -> int:
 
     # No existing viewer (or --new / explicit --port): start one.
     state = ViewerState()
+    source_name = None
     if args.source is not None:
-        name = state.add_source(args.source)
-        print(f"Loaded source '{name}' → {state.sources[name]}")
+        source_name = state.add_source(args.source)
+        print(f"Loaded source '{source_name}' → {state.sources[source_name]}")
+
+    # The token is generated here, in-process, and reaches clients only via
+    # the printed URL and the 0600 state file — never a command line.
+    token = secrets.token_urlsafe(24) if args.require_token else None
 
     server, port = _start_server(args.host, args.port, state,
-                                 base_path=base_path)
+                                 base_path=base_path, token=token)
     if server is None:
         print(
             f"Could not bind a port near {args.port}. "
@@ -176,8 +208,12 @@ def _run_view(args: argparse.Namespace) -> int:
         )
         return 1
 
-    url = f"http://{args.host}:{port}{base_path}/"
+    url = _instance._viewer_url(args.host, port, base_path,
+                                source=source_name, token=token)
     print(f"TraceAct viewer running at {url}")
+    if token:
+        print("Token auth is on: API requests need the token from the URL "
+              "above (?token= or an X-TraceAct-Token header).")
     print("Press Ctrl+C to stop.")
 
     # Only a default-port instance advertises itself as the shared viewer.
@@ -187,7 +223,8 @@ def _run_view(args: argparse.Namespace) -> int:
     # that app's traces would be POSTed here and it would open a viewer
     # showing this one's source instead of its own.
     if not args.new and not user_chose_port:
-        _instance.write_state(args.host, port, base_path=base_path)
+        _instance.write_state(args.host, port, base_path=base_path,
+                              token=token)
 
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -239,14 +276,15 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 
 def _start_server(host: str, port: int, state: ViewerState,
-                  base_path: str = ""):
+                  base_path: str = "", token: Optional[str] = None):
     """
     Try to bind the requested port, incrementing a few times if it's in use.
     Returns (server, actual_port) or (None, port) if no nearby port was free.
     """
     for candidate in range(port, port + 20):
         try:
-            server = ViewerServer(host, candidate, state, base_path=base_path)
+            server = ViewerServer(host, candidate, state,
+                                  base_path=base_path, token=token)
             return server, candidate
         except OSError:
             # Port in use; try the next one.

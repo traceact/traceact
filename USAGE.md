@@ -1297,8 +1297,34 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 | `--no-browser` | off | Start the server without opening a browser tab. |
 | `--new` | off | Force a new viewer instance even if one is already running. |
 | `--base-path PATH` | *(none)* | Mount the viewer at a subpath (e.g. `/audit-viewer`) for reverse-proxy deployments. |
+| `--require-token` | off | Require a random token on every API request. See [Token auth](#token-auth). |
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
+
+### Token auth
+
+By default the viewer accepts any request from the local machine. That is fine on a single-user dev box: anything running as you can read the trace files directly anyway, so the viewer grants nothing extra. The one exposure is a **shared machine** — the server binds `127.0.0.1`, a different OS user can reach that port, and the server reads files with *your* permissions.
+
+`--require-token` closes that:
+
+```bash
+traceact view data/traces.jsonl --require-token
+```
+
+```
+TraceAct viewer running at http://127.0.0.1:8765/?source=agora&token=Xsklccm...
+Token auth is on: API requests need the token from the URL above
+(?token= or an X-TraceAct-Token header).
+```
+
+- Every `/api/*` request must carry the token — `X-TraceAct-Token` header for API clients, `?token=` query param for the browser (whose EventSource and download links can't set headers). Requests without it get `403`.
+- The page shell and static assets stay open; they're the same bytes anyone gets from `pip install traceact`. All trace data flows through the gated API.
+- The token is generated in-process and reaches clients through exactly two channels: the printed URL, and `~/.traceact/viewer.json` (written with mode `0600`). It is never accepted as a command-line value — a token in `traceact view --token abc123` would be readable by every user on the machine via the process list.
+- Same-user tools need no wiring: `launch_or_connect()`, `traceact view` reuse, and `traceact doctor` read the token from the state file and authenticate automatically. Other OS users can't read that file, and that asymmetry is the entire mechanism.
+- On single-instance reuse the running viewer's setting wins, same as `--base-path`: token auth is fixed when a server starts. Asking for a token while an untokened viewer is running prints a notice to stderr and reuses it as it stands.
+- A browser page opened without the token shows "this viewer requires a token" rather than an empty trace log, and learns nothing — not even source names.
+
+Each launch generates a fresh token; restarting the viewer invalidates old URLs. The token appears in the browser URL and therefore in browser history — the same trade Jupyter makes, acceptable because history is readable only by the same OS user the token exists to serve.
 
 ### Health checks (`traceact doctor`)
 
@@ -1337,6 +1363,8 @@ The coordination mechanism is a state file at `~/.traceact/viewer.json` that rec
 Pass `--new` to bypass this and force a second instance — useful when you want two viewers side-by-side with different sources.
 
 ### Adding sources in the viewer
+
+A tab opened without `?source=` in its URL — a bare `traceact view`, or a browser pointed at a running viewer's address by hand — starts on this picker rather than auto-attaching to whichever source happens to be first. Attaching to a stream is always a deliberate click; launch paths that know their source (the CLI with a path, `launch_or_connect(source=...)`) pin it in the URL so they still open attached.
 
 The "Add source" modal supports three ways to load a source:
 
@@ -1387,6 +1415,8 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 `/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path cannot be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
 
 When the viewer is mounted at a `base_path`, all endpoints above are served under that prefix (e.g. `/audit-viewer/api/export`). Requests at the unprefixed paths return 404.
+
+When the viewer was started with `--require-token`, every endpoint above requires the token (`X-TraceAct-Token` header or `?token=` query param) and answers `403` without it. See [Token auth](#token-auth).
 
 `/api/doctor`'s `status` is `"pass"`, `"fail"`, or `"info"`; `hint` is present only on `"fail"` checks. `ok` is `true` only if every `"pass"`/`"fail"` check passed — `"info"` checks (traceact's version, whether a viewer is running) never affect it.
 
@@ -1459,8 +1489,11 @@ launch_or_connect(
     timeout=3.0,      # seconds to wait for a freshly started server to be ready
     name=None,        # label for this source in the picker; derived from the path if unset
     base_path="",     # subpath to mount under, e.g. "/audit-viewer" (default: root)
+    require_token=False,  # start the viewer with token auth (see Token auth)
 ) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/?source=agora"
 ```
+
+The returned URL carries `?source=<name>` so the tab opens attached to *this* app's source — without the param the viewer opens on its source picker rather than auto-attaching to whichever source is first (see [Token auth](#token-auth) and the 0.10.0 changelog entry for why). With `require_token=True` the URL also carries `?token=`; the token itself is generated by the spawned viewer and picked up from the state file, and all of this function's own API calls authenticate with it automatically. Like `base_path`, the flag only takes effect on the launch that actually spawns a server — a viewer already running is reused with whatever token setting it started with.
 
 Pass `base_path` when the viewer sits behind a reverse proxy at a subpath instead of at the server root. The same value must be passed on every call for a given viewer instance — when reusing a running viewer, `launch_or_connect` reads the stored `base_path` from the state file and uses it for all subsequent API calls.
 
@@ -1526,9 +1559,9 @@ Note: cross-origin `fetch` to the viewer will always be blocked by CORS unless t
 
 ### Admin-safe viewer pattern
 
-**The viewer has no authentication of its own** — no login, no token, no session check. This is intentional: it's a local dev tool, and adding auth would mean TraceAct owning credential storage, which it explicitly doesn't want to do. That means access control is entirely your responsibility if more than one trusted person can reach the machine it runs on.
+**The viewer has no login of its own** — no accounts, no sessions, no credential storage. This is intentional: it's a local dev tool. What it does have is [opt-in token auth](#token-auth) (`--require-token`), which keeps other OS users on a shared machine out of the API. That is the full extent of its access control; anything beyond it — user accounts, roles, network exposure — is your application's responsibility.
 
-**Rule of thumb:** never bind the viewer to a non-localhost host (`--host 0.0.0.0` or similar) unless you put your own authentication in front of it. Binding `127.0.0.1` (the default) means only processes on the same machine can reach it, which is the safe default for local development.
+**Rule of thumb:** never bind the viewer to a non-localhost host (`--host 0.0.0.0` or similar) unless you put your own authentication in front of it — the token gates other *local* users, not the open network, and it travels in URLs that plain HTTP shows to every hop. Binding `127.0.0.1` (the default) means only processes on the same machine can reach it; add `--require-token` on shared machines so "same machine" also means "same user".
 
 If you want a "traceact viewer" button inside an internal team tool (like the FastAPI/Flask examples above), gate the *button and the route*, not the viewer itself:
 

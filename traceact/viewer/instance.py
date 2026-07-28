@@ -30,7 +30,8 @@ _STATE_DIR = os.path.expanduser("~/.traceact")
 _STATE_FILE = os.path.join(_STATE_DIR, "viewer.json")
 
 
-def write_state(host: str, port: int, base_path: str = "") -> None:
+def write_state(host: str, port: int, base_path: str = "",
+                token: Optional[str] = None) -> None:
     """
     Record the running viewer's location so later launches can find it.
 
@@ -38,12 +39,22 @@ def write_state(host: str, port: int, base_path: str = "") -> None:
     under a prefix answers nothing at the root: a later launch that probed
     ``/api/health`` without the prefix would read the live viewer as dead and
     spawn a duplicate on the next port.
+
+    ``token`` is stored when the viewer requires one, and the file is set to
+    mode 0600 either way: the token is what keeps other OS users out of the
+    API, so it must not be readable by them here. Same-user tools read it
+    from this file and authenticate transparently — that asymmetry (your own
+    processes get in, other accounts don't) is the entire design.
     """
     try:
         os.makedirs(_STATE_DIR, exist_ok=True)
+        payload = {"host": host, "port": port, "pid": os.getpid(),
+                   "base_path": base_path}
+        if token:
+            payload["token"] = token
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"host": host, "port": port, "pid": os.getpid(),
-                       "base_path": base_path}, f)
+            json.dump(payload, f)
+        os.chmod(_STATE_FILE, 0o600)
     except OSError:
         # Not being able to write the state file is non-fatal; it just means
         # single-instance reuse won't kick in. The viewer still runs.
@@ -67,17 +78,20 @@ def _read_state() -> Optional[Dict[str, Any]]:
 
 
 def probe(host: str, port: int, timeout: float = 0.5,
-          base_path: str = "") -> Optional[dict]:
+          base_path: str = "", token: Optional[str] = None) -> Optional[dict]:
     """
     Ask a candidate viewer whether it is alive. Returns its health payload
     (which includes the version and source count) or None if nothing answers.
 
     ``base_path`` must match the prefix the viewer was started under; a
-    mounted viewer serves nothing at the root.
+    mounted viewer serves nothing at the root. ``token`` must match a
+    token-gated viewer's token — /api/health is gated with everything else,
+    so a probe without it reads a live tokened viewer as absent.
     """
     url = f"http://{host}:{port}{base_path}/api/health"
+    req = urllib.request.Request(url, headers=_token_headers(token))
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 return json.loads(resp.read().decode("utf-8"))
     except Exception:
@@ -85,14 +99,40 @@ def probe(host: str, port: int, timeout: float = 0.5,
     return None
 
 
+def _token_headers(token: Optional[str]) -> dict:
+    """The auth header dict for a token, or {} when there is no token."""
+    return {"X-TraceAct-Token": token} if token else {}
+
+
+def _viewer_url(host: str, port: int, base_path: str = "",
+                source: Optional[str] = None,
+                token: Optional[str] = None) -> str:
+    """
+    Build the URL a browser should open for a viewer: the mount root plus
+    ``?source=`` (so the app attaches to that source rather than opening the
+    picker) and ``?token=`` (so a token-gated viewer's page can call its own
+    API — the front-end reads it from location.search).
+    """
+    from urllib.parse import quote
+
+    params = []
+    if source:
+        params.append("source=" + quote(source, safe=""))
+    if token:
+        params.append("token=" + quote(token, safe=""))
+    query = ("?" + "&".join(params)) if params else ""
+    return f"http://{host}:{port}{base_path}/{query}"
+
+
 def find_running() -> Optional[Dict[str, Any]]:
     """
-    Return {host, port, base_path, health} for a live viewer recorded in the
-    state file, or None if there is no record or the recorded viewer is not
-    responding.
+    Return {host, port, base_path, token, health} for a live viewer recorded
+    in the state file, or None if there is no record or the recorded viewer
+    is not responding.
 
-    ``base_path`` is "" for a viewer serving at the root, which is both the
-    default and what every state file written before this key existed implies.
+    ``base_path`` is "" for a viewer serving at the root, and ``token`` is
+    None for one that doesn't require a token — both the default, and what
+    every state file written before these keys existed implies.
     """
     state = _read_state()
     if not state:
@@ -101,11 +141,12 @@ def find_running() -> Optional[Dict[str, Any]]:
     if not host or not port:
         return None
     base_path = state.get("base_path") or ""
-    health = probe(host, port, base_path=base_path)
+    token = state.get("token") or None
+    health = probe(host, port, base_path=base_path, token=token)
     if health is None:
         return None
     return {"host": host, "port": port, "base_path": base_path,
-            "health": health}
+            "token": token, "health": health}
 
 
 def launch_or_connect(
@@ -116,6 +157,7 @@ def launch_or_connect(
     timeout: float = 3.0,
     name: Optional[str] = None,
     base_path: str = "",
+    require_token: bool = False,
 ) -> str:
     """
     Ensure a viewer is running and return its URL.  Designed to be called from
@@ -166,11 +208,22 @@ def launch_or_connect(
     server starts, so this argument only takes effect on the launch that
     actually spawns one. The returned URL always reflects where the viewer
     answering the call really lives.
+
+    ``require_token`` starts the viewer with token auth: every API request
+    must carry a random token or is refused with 403. The token is generated
+    by the spawned viewer itself (never passed on a command line, where other
+    users could read it from the process list), stored in the state file with
+    mode 0600, and included in the returned URL so the browser page can call
+    its own API. Same-user callers keep working with no further wiring — this
+    function and its helpers read the token from the state file — while other
+    OS users on a shared machine, who could otherwise reach the localhost
+    port, are shut out. Like ``base_path``, this only takes effect on the
+    launch that actually spawns a server: a viewer already running is reused
+    with whatever token setting it started with, tokened or not.
     """
     import subprocess
     import sys
     import time
-    from urllib.parse import quote
 
     from traceact.viewer.server import _normalise_base_path
     base_path = _normalise_base_path(base_path)
@@ -178,14 +231,16 @@ def launch_or_connect(
     existing = find_running()
     if existing is not None:
         h, p = existing["host"], existing["port"]
-        # The running viewer's own prefix wins: it is already bound and
-        # serving there, whatever this caller asked for.
+        # The running viewer's own prefix and token win: it is already bound
+        # and serving with them, whatever this caller asked for.
         b = existing.get("base_path", "")
+        t = existing.get("token")
         if source is not None:
-            added = add_source_to(h, p, source, name=name, base_path=b)
+            added = add_source_to(h, p, source, name=name, base_path=b,
+                                  token=t)
             if added and added.get("name"):
-                return f"http://{h}:{p}{b}/?source={quote(added['name'], safe='')}"
-        return f"http://{h}:{p}{b}/"
+                return _viewer_url(h, p, b, source=added["name"], token=t)
+        return _viewer_url(h, p, b, token=t)
 
     # Not running — start one in the background. A source is seeded on the
     # command line only when no explicit name was given: the CLI path derives
@@ -194,14 +249,24 @@ def launch_or_connect(
            "--host", host, "--port", str(port)]
     if base_path:
         cmd += ["--base-path", base_path]
+    if require_token:
+        cmd.append("--require-token")
     if source is not None and name is None:
         cmd.append(source)
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Wait for it to be ready (polls health endpoint).
+    # Wait for it to be ready (polls health endpoint). A tokened viewer's
+    # health check refuses an unauthenticated probe, so the token has to be
+    # picked up from the state file — written by the spawned process — before
+    # the probe can succeed.
+    token: Optional[str] = None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if probe(host, port, base_path=base_path) is not None:
+        if require_token and token is None:
+            recorded = _read_state() or {}
+            if recorded.get("host") == host and recorded.get("port") == port:
+                token = recorded.get("token")
+        if probe(host, port, base_path=base_path, token=token) is not None:
             break
         time.sleep(0.1)
 
@@ -212,19 +277,22 @@ def launch_or_connect(
     if source is not None:
         if name is not None:
             added = add_source_to(host, port, source, name=name,
-                                  base_path=base_path)
+                                  base_path=base_path, token=token)
             if added and added.get("name"):
-                return f"http://{host}:{port}{base_path}/?source={quote(added['name'], safe='')}"
-        names = list_source_names(host, port, base_path=base_path)
+                return _viewer_url(host, port, base_path,
+                                   source=added["name"], token=token)
+        names = list_source_names(host, port, base_path=base_path, token=token)
         if names:
-            return f"http://{host}:{port}{base_path}/?source={quote(names[0], safe='')}"
-    return f"http://{host}:{port}{base_path}/"
+            return _viewer_url(host, port, base_path, source=names[0],
+                               token=token)
+    return _viewer_url(host, port, base_path, token=token)
 
 
 def add_source_to(host: str, port: int, path: str,
                   timeout: float = 1.0,
                   name: Optional[str] = None,
-                  base_path: str = "") -> Optional[dict]:
+                  base_path: str = "",
+                  token: Optional[str] = None) -> Optional[dict]:
     """
     Ask an already-running viewer to add a source. Returns the created source
     ({name, path}) or None on failure.
@@ -233,17 +301,18 @@ def add_source_to(host: str, port: int, path: str,
     from the path. Note the viewer dedupes by path, so a path it already knows
     keeps the name it was first registered under.
 
-    ``base_path`` must match the prefix the target viewer serves under.
+    ``base_path`` and ``token`` must match what the target viewer serves
+    under and requires.
     """
     url = f"http://{host}:{port}{base_path}/api/sources"
     payload = {"path": path}
     if name is not None:
         payload["name"] = name
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
-    )
+    headers = {"Content-Type": "application/json"}
+    headers.update(_token_headers(token))
+    req = urllib.request.Request(url, data=data, headers=headers,
+                                 method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -253,16 +322,19 @@ def add_source_to(host: str, port: int, path: str,
 
 def list_source_names(host: str, port: int,
                       timeout: float = 1.0,
-                      base_path: str = "") -> list:
+                      base_path: str = "",
+                      token: Optional[str] = None) -> list:
     """
     Return the names of the sources registered with a running viewer, in the
     order the viewer reports them. Empty list on any failure.
 
-    ``base_path`` must match the prefix the target viewer serves under.
+    ``base_path`` and ``token`` must match what the target viewer serves
+    under and requires.
     """
     url = f"http://{host}:{port}{base_path}/api/sources"
+    req = urllib.request.Request(url, headers=_token_headers(token))
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             sources = json.loads(resp.read().decode("utf-8"))
         return [s["name"] for s in sources if isinstance(s, dict) and "name" in s]
     except Exception:

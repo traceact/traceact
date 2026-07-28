@@ -335,7 +335,7 @@ class TestPrivateInstanceStateGating:
         monkeypatch.setattr(cli._instance, "clear_state", clear_state)
         monkeypatch.setattr(
             cli, "_start_server",
-            lambda h, p, s, base_path="": (fake_server, p),
+            lambda h, p, s, base_path="", token=None: (fake_server, p),
         )
         monkeypatch.setattr(
             cli._instance, "find_running", lambda: None

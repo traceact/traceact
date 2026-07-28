@@ -2,6 +2,16 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.10.0] — 2026-07-28
+
+### Added
+
+- **Opt-in token auth (`--require-token` / `launch_or_connect(require_token=True)`).** When enabled, every `/api/*` request must carry a random token — `X-TraceAct-Token` header or `?token=` query param — or is refused with 403. The page shell and static assets stay open (they're the same bytes anyone gets from `pip install traceact`); every piece of trace data flows through the gated API. This closes the one hole a localhost server has: on a shared machine, a different OS user can reach `127.0.0.1` and would otherwise read traces through a server running with your file permissions. The token is generated in-process with `secrets` (never accepted as a command-line value, where the process list would expose it), printed as part of the startup URL, and stored in `~/.traceact/viewer.json` at mode `0600` — so your own tools authenticate automatically via the state file while other accounts can't read it. Token comparison is constant-time. Default is off: existing launchers are untouched, and a stray `?token=` param at an untokened server is ignored. On single-instance reuse the running viewer's setting wins (same policy as `base_path`); asking for a token when the running viewer has none prints a notice instead of failing. A state file that lacks the token of a tokened viewer fails closed — the probe reads it as absent and the caller starts its own. An unauthenticated browser page says "this viewer requires a token" rather than posing as an empty trace log.
+
+### Changed
+
+- **Opening the viewer without `?source=` no longer auto-attaches to the first registered source.** A fresh session against a shared viewer previously landed directly on whatever stream happened to be first — some other app's traces, which reads as a leak even though the picker offered the same data one click away. The app now opens on the source picker, and attaching is that deliberate click. Every launch path that knows its source pins it: `traceact view mylog.jsonl` and `launch_or_connect(source=...)` open `?source=<name>` on both the fresh-start and reuse branches, so the common case still opens directly on the right stream.
+
 ## [0.9.0] — 2026-07-28
 
 ### Added

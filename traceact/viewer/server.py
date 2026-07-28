@@ -25,6 +25,15 @@
 # app's reverse proxy on one port, under that app's own auth, instead of
 # exposing a second port. See _normalise_base_path and _Handler._strip_base.
 #
+# Token auth (opt-in):
+# A server constructed with a token requires it on every /api/* request —
+# X-TraceAct-Token header or ?token= query param. This closes the one hole a
+# localhost server has: on a shared machine, a *different OS user* can reach
+# 127.0.0.1 and would otherwise read traces through a server running with this
+# user's file permissions. The token lives in ~/.traceact/viewer.json (mode
+# 0600), so same-user tools pick it up transparently and other users cannot.
+# Default is no token: fully open to local callers, as it always was.
+#
 # Why SSE and not WebSockets:
 # The data flow is one-directional — the server pushes traces to the browser and
 # the browser never sends trace data back. SSE is exactly that shape, runs over
@@ -45,6 +54,7 @@
 # a second stream). Threads are daemons so the process can exit cleanly.
 
 import heapq
+import hmac
 import json
 import os
 import re
@@ -235,6 +245,30 @@ class _Handler(BaseHTTPRequestHandler):
             return path[len(base):]
         return None
 
+    def _authorised(self, parsed) -> bool:
+        """
+        Whether this request may reach the API. Always true on a server
+        started without a token. With one, the request must carry it — as an
+        ``X-TraceAct-Token`` header (API clients) or a ``token`` query param
+        (the browser, whose EventSource and download links can't set headers).
+
+        Only /api/* is gated. The page shell and its static assets are the
+        same bytes anyone gets from `pip install traceact`; every piece of
+        trace data flows through the API, so that is where the boundary is.
+        Comparisons are constant-time so the token can't be guessed a
+        character at a time from response timing.
+        """
+        token = getattr(self.server, "token", None)
+        if not token:
+            return True
+        header = self.headers.get("X-TraceAct-Token")
+        if header is not None:
+            return hmac.compare_digest(header, token)
+        supplied = _first(parse_qs(parsed.query).get("token"))
+        if supplied is not None:
+            return hmac.compare_digest(supplied, token)
+        return False
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         route = self._strip_base(parsed.path)
@@ -246,6 +280,10 @@ class _Handler(BaseHTTPRequestHandler):
             # "/audit-viewer" → "/audit-viewer/", so the app always loads from
             # a URL ending in a slash.
             self._redirect(self._base_path() + "/")
+            return
+
+        if route.startswith("/api/") and not self._authorised(parsed):
+            self._send_error(403, "Token required")
             return
 
         if route == "/":
@@ -272,6 +310,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         route = self._strip_base(parsed.path)
+        if route is not None and route.startswith("/api/") \
+                and not self._authorised(parsed):
+            self._send_error(403, "Token required")
+            return
         if route == "/api/sources":
             self._add_source()
         elif route == "/api/import":
@@ -622,10 +664,14 @@ class ViewerServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, host: str, port: int, state: ViewerState,
-                 base_path: str = "") -> None:
+                 base_path: str = "", token: Optional[str] = None) -> None:
         # Normalised once here rather than on every request, and stored so
         # _Handler can read it off the server instance.
         self.base_path = _normalise_base_path(base_path)
+        # When set, every /api/* request must present this token (see
+        # _Handler._authorised). None — the default — leaves the server open
+        # to any local caller, exactly as before tokens existed.
+        self.token = token or None
         super().__init__((host, port), _Handler)
         self.state = state
 

@@ -76,6 +76,7 @@ traceact show [SOURCE] ...   # identical alias of view
 | `--no-browser` | off | Start the server without opening a browser tab |
 | `--new` | off | Force a fresh instance even if one is already running |
 | `--base-path PATH` | *(none)* | Mount at a subpath for reverse-proxy deployments |
+| `--require-token` | off | Require a random token on every API request — keeps other OS users on a shared machine out |
 
 ### Port selection
 
