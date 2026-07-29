@@ -2,6 +2,21 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.11.0] — 2026-07-29
+
+### Changed
+
+- **Default `sink_mode` is now `"blocking"`.** The resolved package default was `"buffered"` while the documentation presented `"blocking"` — and buffered as a *default* meant a long-running app that set sinks but not `sink_mode` wrote nothing until process exit, and a crash lost every buffered trace (the exit flush only runs on normal shutdown). Traces now hit the sink the moment they finish, matching the documented behaviour and the first-run experience the package is built around. Buffered mode is unchanged as an explicit opt-in. Apps that already set `sink_mode` are unaffected; apps that relied on the undocumented buffered default now write per-trace instead of deferring to exit.
+- **The buffered flush path falls back to `ConsoleSink` when no sinks are configured**, matching the blocking path and the documented fallback. Previously a zero-config app in buffered mode discarded every record at flush with nothing to show it ever existed.
+
+### Fixed
+
+- **Hostile payloads can no longer crash the traced application.** `trace.input()`, `trace.output()`, and event results run inside the traced function's own call, so an exception escaping the sanitiser crashed the app being observed — breaking the `strict=False` promise. Two escape paths existed, both now closed:
+  - A **circular structure** (or one nested thousands of levels deep) raised `RecursionError` through the recursive sanitiser. It now carries path-scoped cycle detection and a 100-level depth cap: cycles become `[circular reference]` at the first back-reference, over-deep branches become `[nested too deep]`, and legitimately shared substructures (the same dict under two keys) are not misread as cycles.
+  - An **object whose `__str__` raises** escaped through `json.dumps(default=str)`, whose failure was only caught for `TypeError`/`ValueError`. The default hook now guards the `str()` call and the serialisation catch is broadened, so such values degrade to `[TypeName]`.
+  - The deeper recursion also closes a redaction hole: a dict inside a list inside a list (`[[{"password": ...}]]`) is now redacted; previously only dicts at the first list level were entered.
+- **Sink write failures in blocking mode are reported to stderr** instead of being swallowed with no signal. `SqliteSink` already printed its own errors; a failing `JsonlSink` (disk full, permissions) lost the record invisibly. `strict=True` still raises, and other configured sinks still receive the record as before.
+
 ## [0.10.0] — 2026-07-28
 
 ### Added

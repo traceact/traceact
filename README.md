@@ -17,11 +17,10 @@ pip install traceact
 ## Quick start
 
 ```python
-from traceact import traced_action, configure, TraceConfig, JsonlSink
+from traceact import traced_action, configure, JsonlSink
 
 configure(
     project="my-app",
-    config=TraceConfig(sink_mode="blocking"),
     sinks=[JsonlSink("data/traces.jsonl")],
 )
 
@@ -30,7 +29,7 @@ def create_note(title, body):
     ...
 ```
 
-Each traced function call produces one JSON object appended to the JSONL file. Open the viewer to explore it live.
+Each traced function call produces one JSON object appended to the JSONL file the moment it finishes — writes are immediate by default, so the viewer shows traces as your app runs. Without any `configure()` at all, traces print to stdout instead of vanishing.
 
 ## Manual tracing
 

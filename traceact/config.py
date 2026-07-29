@@ -42,10 +42,13 @@ class TraceConfig:
 
         sink_mode:
             Controls when traces are written to sinks.
-            "blocking"  — write immediately when a trace finishes. Best for
-                          local development and tests.
+            "blocking"  — write immediately when a trace finishes. The
+                          package default: traces appear in the sink (and the
+                          viewer) the moment they complete.
             "buffered"  — accumulate finished traces in memory and flush them
-                          later (or on program exit). Best default for small apps.
+                          later (or on program exit). Opt-in for hot paths
+                          where per-trace write latency is unwelcome; note a
+                          hard crash loses whatever is still buffered.
             "disabled"  — never write anything, regardless of sink configuration.
                           Use as a performance kill switch that still leaves
                           decorators in place.

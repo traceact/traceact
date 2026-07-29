@@ -123,9 +123,11 @@ All fields are optional. Omitted fields use package defaults. `configure()` can 
 **`project`** is the recommended way to name your traces. It is stamped onto every trace produced by this process and used by the viewer to label the source. Traces written without a `project` emit a `UserWarning` at runtime. A per-trace `project=` argument on `@traced_action` or `ActionTrace.start()` overrides the package-level value for that trace only.
 
 **Sink modes:**
-- `"blocking"` — write immediately when a trace finishes. Best for development.
-- `"buffered"` — hold traces in memory, flush on exit or on explicit `flush_buffer()`. Best for production.
+- `"blocking"` *(default)* — write immediately when a trace finishes. Traces appear in the sink, and the viewer, the moment they complete.
+- `"buffered"` — hold traces in memory, flush on exit or on explicit `flush_buffer()`. Opt in for hot paths where per-trace write latency is unwelcome. Two costs to know: nothing appears in the sink until a flush, and a hard crash loses whatever is still buffered (the exit flush only runs on normal interpreter shutdown).
 - `"disabled"` — decorators stay in place but nothing is recorded or written.
+
+If no sinks are configured, traces fall back to `ConsoleSink` — in both modes. A trace is never dropped just because setup is incomplete.
 
 ---
 
@@ -603,9 +605,12 @@ configure(config=TraceConfig(capture_inputs=False))
 1. Maps positional args to parameter names using `inspect.signature()`.
 2. Skips `self` and `cls`.
 3. Redacts arguments whose names match sensitive patterns: `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`, `apikey`, `private_key`, `privatekey`, `access_key`, `accesskey`, `auth`, `credential`, `credentials`, `credit_card`, `card_number`, `cvv`, `ssn`.
-4. Recurses into nested dicts and lists-of-dicts, so a sensitive field buried inside a request body or config object is also redacted — not just top-level keys (see below).
-5. Truncates values larger than `max_payload_bytes`.
-6. Converts non-serialisable types to `[TypeName]`.
+4. Recurses into nested dicts and lists (including lists inside lists), so a sensitive field buried inside a request body or config object is also redacted — not just top-level keys (see below).
+5. Truncates values larger than `max_payload_bytes` to `[truncated: N chars]`.
+6. Converts non-serialisable types to `[TypeName]` — including objects whose own `__str__` raises.
+7. Replaces self-referencing structures with `[circular reference]` and cuts branches nested more than 100 levels deep with `[nested too deep]`, so a hostile or accidental payload can never blow the recursion stack inside your function call.
+
+These rules apply identically to `trace.input()`, `trace.output()`, and event `result` values. None of them can raise into your application: a payload the sanitiser can't represent degrades to a placeholder, never to an exception.
 
 **`trace.input()` always works** regardless of the `capture_inputs` setting.
 

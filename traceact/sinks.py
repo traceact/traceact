@@ -24,6 +24,7 @@ import atexit
 import json
 import os
 import queue
+import sys
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -116,21 +117,31 @@ def flush_buffer(sinks: List[Any]) -> None:
     so a record appended mid-flush is kept for the next flush rather than
     lost. Sink writes happen outside the lock so a slow sink never blocks
     the traced application from buffering.
+
+    With no sinks configured, buffered records fall back to ConsoleSink —
+    the same fallback the blocking path applies at write time. Without it,
+    a developer who buffers traces and never configures a sink would have
+    every record discarded here with nothing to show it ever existed.
     """
     with _buffer_lock:
         if not _buffer:
             return
         snapshot = list(_buffer)
         _buffer.clear()
+    if not sinks:
+        sinks = [ConsoleSink()]
     for record in snapshot:
         for sink in sinks:
             try:
                 sink.write(record)
-            except Exception:
-                # Sink failures never crash the application. Tracing is
-                # observability tooling; it must never become a point of
-                # failure for the code it is observing.
-                pass
+            except Exception as e:
+                # Sink failures never crash the application, but they are
+                # reported: a record dropped here has no other trace left.
+                print(
+                    f"TraceAct: {type(sink).__name__}.write() failed "
+                    f"during buffer flush: {e}",
+                    file=sys.stderr,
+                )
 
 
 # ---------------------------------------------------------------------------

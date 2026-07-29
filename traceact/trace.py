@@ -36,6 +36,7 @@
 
 import json
 import random
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -200,7 +201,12 @@ def _resolve_config(
     """
     # Start with hard-coded defaults.
     enabled = True
-    sink_mode = "buffered"
+    # "blocking" so the first-run experience is "trace it, run it, see it":
+    # traces hit the sink (and the viewer) the moment they finish. Buffered
+    # mode defers writes to an atexit flush — as a *default* that meant a
+    # long-running server showed nothing until shutdown, and a crash lost
+    # every buffered trace. Production opts into "buffered" deliberately.
+    sink_mode = "blocking"
     strict = False
     redact_by_default = True
     capture_inputs: Any = False   # safe default: no automatic capture
@@ -322,29 +328,62 @@ def _resolve_budget(
 # Payload safety helpers
 # ---------------------------------------------------------------------------
 
+# How deep _safe_value follows nested dicts/lists before giving up on a
+# branch. Any honest payload is nowhere near this; a structure that is means
+# either generated data (where the tail carries no diagnostic value) or an
+# attempt to blow the recursion stack from inside a traced argument.
+_MAX_SANITISE_DEPTH = 100
+
+
+def _json_default(value: Any) -> str:
+    """
+    json.dumps fallback for non-native values. str() runs arbitrary user
+    __str__ code, which can itself raise — and an exception here would
+    propagate out of the traced application's own function call.
+    """
+    try:
+        return str(value)
+    except Exception:
+        return f"[{type(value).__name__}]"
+
+
 def _safe_value(
     field_name: str,
     value: Any,
     max_bytes: int,
     redact: bool,
     patterns: "frozenset" = SENSITIVE_PATTERNS,
+    _depth: int = 0,
+    _on_path: Optional[set] = None,
 ) -> Any:
     """
     Sanitise a single value before storing it in a trace record.
+
+    This function must never raise: it runs inside the traced application's
+    own call (trace.input(), event results, captured arguments), so anything
+    escaping here crashes the app being observed — the one thing TraceAct
+    promises not to do.
 
     Applies these safety rules, in order:
         1. Redaction: if the field name matches a sensitive pattern and
            redact=True, replace the value with "[redacted]". This short-
            circuits — a redacted value is never recursed into.
-        2. Recursion: if the value is a dict, sanitise its keys the same way
-           (so a field like "headers" or "request" doesn't shield a nested
-           "authorization" or "password" key from redaction). If it's a list,
-           recurse into any dict elements the same way; non-dict elements are
-           left for rule 3/4 below.
+        2. Recursion: if the value is a dict or list, sanitise its contents
+           the same way (so a field like "headers" or "request" doesn't
+           shield a nested "authorization" or "password" key from redaction).
+           A container already on the current recursion path is replaced with
+           "[circular reference]" instead of being entered again; a branch
+           deeper than _MAX_SANITISE_DEPTH is replaced with "[nested too
+           deep]". Both would otherwise blow the recursion stack — and a
+           RecursionError raised mid-recursion escapes any except clause
+           placed around only the serialisation step.
         3. Size limit: if the JSON representation exceeds max_bytes, replace
            the value with a "[truncated: N chars]" summary.
         4. Serialisability: if the value cannot be JSON-serialised (e.g. a
-           complex object), replace it with a "[TypeName]" summary.
+           complex object), replace it with a "[TypeName]" summary. The
+           except clause is deliberately broad: json.dumps invokes user
+           __str__/__repr__ code via its default hook, which can raise
+           anything at all, not just TypeError.
 
     Args:
         field_name: The name of the field (used for redaction pattern matching).
@@ -354,9 +393,16 @@ def _safe_value(
         patterns:   The fully resolved set of sensitive-name substrings
                     (baseline + any active presets) to match field names
                     against, at this level and every nested level.
+        _depth:     Internal: current recursion depth.
+        _on_path:   Internal: ids of the containers on the current recursion
+                    path. Path-scoped (added before descending, removed
+                    after), so a diamond — the same sub-dict under two
+                    different keys — is not misread as a cycle.
 
     Returns:
-        The original value, "[redacted]", "[truncated: N chars]", or "[TypeName]".
+        The original value, or one of the placeholder strings: "[redacted]",
+        "[truncated: N chars]", "[circular reference]", "[nested too deep]",
+        "[TypeName]".
     """
     # Rule 1: Redact sensitive fields.
     if redact and _is_sensitive(field_name, patterns):
@@ -364,28 +410,45 @@ def _safe_value(
 
     # Rule 2: Recurse into nested structures so a sensitive key isn't hidden
     # a level or two down inside a request body, config dict, etc.
-    if isinstance(value, dict):
-        value = _sanitise_dict(value, max_bytes, redact, patterns)
-    elif isinstance(value, list):
-        value = [
-            _sanitise_dict(item, max_bytes, redact, patterns)
-            if isinstance(item, dict) else item
-            for item in value
-        ]
+    if isinstance(value, (dict, list)):
+        if _on_path is None:
+            _on_path = set()
+        container_id = id(value)
+        if container_id in _on_path:
+            return "[circular reference]"
+        if _depth >= _MAX_SANITISE_DEPTH:
+            return "[nested too deep]"
+        _on_path.add(container_id)
+        try:
+            if isinstance(value, dict):
+                value = {
+                    k: _safe_value(k, v, max_bytes, redact, patterns,
+                                   _depth + 1, _on_path)
+                    for k, v in value.items()
+                }
+            else:
+                value = [
+                    _safe_value(field_name, item, max_bytes, redact, patterns,
+                                _depth + 1, _on_path)
+                    if isinstance(item, (dict, list)) else item
+                    for item in value
+                ]
+        finally:
+            _on_path.discard(container_id)
 
     # Rule 3 & 4: Check serialisability and size. Runs on the already-
     # sanitised structure, so a "[redacted]" placeholder is tiny and never
     # itself triggers the size limit.
     try:
-        serialised = json.dumps(value, default=str)
+        serialised = json.dumps(value, default=_json_default)
         byte_count = len(serialised.encode("utf-8"))
         if byte_count > max_bytes:
             return f"[truncated: {len(serialised)} chars]"
         # Re-parse so the stored value is always a JSON-native type (not an
         # object that will fail later during sink serialisation).
         return json.loads(serialised)
-    except (TypeError, ValueError):
-        # Value is not JSON-serialisable at all.
+    except Exception:
+        # Value defeated serialisation entirely.
         return f"[{type(value).__name__}]"
 
 
@@ -395,8 +458,18 @@ def _sanitise_dict(
     redact: bool,
     patterns: "frozenset" = SENSITIVE_PATTERNS,
 ) -> Dict[str, Any]:
-    """Apply _safe_value to every key-value pair in a dict, recursively."""
-    return {k: _safe_value(k, v, max_bytes, redact, patterns) for k, v in data.items()}
+    """
+    Apply _safe_value to every key-value pair in a dict, recursively.
+
+    The root dict is seeded onto the recursion path, so a value that refers
+    back to the dict being sanitised reads "[circular reference]" at the
+    first reference, not after one confusing unrolling of the cycle.
+    """
+    on_path = {id(data)}
+    return {
+        k: _safe_value(k, v, max_bytes, redact, patterns, 1, on_path)
+        for k, v in data.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1078,8 +1151,13 @@ class ActionTrace(TraceHelpersMixin):
                 except Exception as e:
                     if self._effective_config.strict:
                         raise
-                    # Swallow silently in non-strict mode.
-                    _ = e
+                    # Never crash the traced app over a sink, but never lose
+                    # the failure in silence either — a sink that can't write
+                    # is the one drop the user has no other way to see.
+                    print(
+                        f"TraceAct: {type(sink).__name__}.write() failed: {e}",
+                        file=sys.stderr,
+                    )
 
         elif mode == "buffered":
             # buffer_record also registers the atexit flush handler.
