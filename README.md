@@ -125,6 +125,23 @@ Wherever TraceAct might skip, drop, or truncate data, there is a signal for it. 
 
 The design choice is always: **silent by default, observable by choice**. You decide whether to log, alert on, or ignore those signals. TraceAct never makes that decision for you.
 
+## Tracing AI agents
+
+One agent turn is a model call plus tool calls, and telling those apart is the point of tracing an agent. TraceAct ships a `"tool"` event kind, explicit parenting for callback-style frameworks, and a LangChain adapter:
+
+```python
+from traceact.integrations.langchain import TraceActCallbackHandler
+
+handler = TraceActCallbackHandler()
+chain.invoke(inputs, config={"callbacks": [handler]})
+```
+
+Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Prompt text is not recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
+
+Captured values are guarded twice: field-name redaction (`password`, `api_key`, …) plus default-on content scanning that catches credential formats (AWS keys, `sk-` tokens, JWTs, PEM blocks) wherever they appear — even in a field named `location` or mid-sentence in free text. `traceact doctor --scan` runs the same registry over trace files already on disk.
+
+For long-running work, opt-in in-flight streaming (`TraceConfig(stream_progress=True)`) shows a `running` row that fills in as the trace progresses — and a process that crashes mid-trace leaves its last snapshot on disk as evidence instead of losing the trace entirely.
+
 ## Wiring into a web app
 
 If your app has its own UI, add a backend route to launch or connect to the viewer, then call it from a button:

@@ -37,6 +37,8 @@
 import json
 import random
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -53,7 +55,7 @@ from traceact.config import (
 from traceact.context import SKIP, get_active_trace, is_skip, pop_trace, push_trace
 from traceact.helpers import TraceHelpersMixin
 from traceact.ids import new_event_id, new_step_id, new_trace_id
-from traceact.redaction import REDACTION_PRESETS, SENSITIVE_PATTERNS
+from traceact.redaction import REDACTION_PRESETS, SENSITIVE_PATTERNS, scan_value
 from traceact.sinks import ConsoleSink, buffer_record, flush_buffer
 
 
@@ -109,6 +111,7 @@ _EVENT_TO_TOUCH_KIND: Dict[str, str] = {
     "queue": "queue",
     "auth":  "auth_provider",
     "email": "email_service",
+    "tool":  "tool",
 }
 
 
@@ -125,7 +128,7 @@ class _EffectiveConfig:
     __slots__ = (
         "enabled", "sink_mode", "strict",
         "redact_by_default", "capture_inputs", "capture_outputs",
-        "redaction_patterns",
+        "redaction_patterns", "redact_values", "stream_progress",
     )
 
     def __init__(
@@ -137,6 +140,8 @@ class _EffectiveConfig:
         capture_inputs: Any,
         capture_outputs: bool,
         redaction_patterns: "frozenset",
+        redact_values: bool,
+        stream_progress: Any = None,
     ) -> None:
         self.enabled = enabled
         self.sink_mode = sink_mode
@@ -148,6 +153,14 @@ class _EffectiveConfig:
         # in TraceConfig(redaction_presets=[...]). Only consulted when
         # redact_by_default is True.
         self.redaction_patterns = redaction_patterns
+        # Whether captured string values are scanned for known credential
+        # formats (redaction.VALUE_PATTERNS). Independent of the field-name
+        # mechanism above.
+        self.redact_values = redact_values
+        # In-flight streaming spelling as validated by TraceConfig:
+        # None/False off, True stubs@1s, <seconds> stubs@interval,
+        # "full" full records@1s. Parsed into (mode, interval) per trace.
+        self.stream_progress = stream_progress
 
 
 class _EffectiveBudget:
@@ -211,6 +224,8 @@ def _resolve_config(
     redact_by_default = True
     capture_inputs: Any = False   # safe default: no automatic capture
     capture_outputs = True
+    redact_values = True          # value-pattern scanning on by default
+    stream_progress: Any = None   # in-flight streaming off by default
 
     redaction_presets: Optional[List[str]] = None
 
@@ -224,6 +239,8 @@ def _resolve_config(
         if pkg.capture_inputs is not None:   capture_inputs = pkg.capture_inputs
         if pkg.capture_outputs is not None:  capture_outputs = pkg.capture_outputs
         if pkg.redaction_presets is not None: redaction_presets = pkg.redaction_presets
+        if pkg.redact_values is not None:    redact_values = pkg.redact_values
+        if pkg.stream_progress is not None:  stream_progress = pkg.stream_progress
 
     # Apply local override from this specific decorator or start() call.
     if local_override is not None:
@@ -237,6 +254,8 @@ def _resolve_config(
         # other field here — a decorator that cares enough to override
         # presets is expected to name the full set it wants.
         if local_override.redaction_presets is not None: redaction_presets = local_override.redaction_presets
+        if local_override.redact_values is not None:    redact_values = local_override.redact_values
+        if local_override.stream_progress is not None:  stream_progress = local_override.stream_progress
 
     # Safety: if the package-level config explicitly set capture_inputs=False,
     # that is the global kill switch and it cannot be overridden by a decorator.
@@ -259,6 +278,8 @@ def _resolve_config(
         capture_inputs=capture_inputs,
         capture_outputs=capture_outputs,
         redaction_patterns=redaction_patterns,
+        redact_values=redact_values,
+        stream_progress=stream_progress,
     )
 
 
@@ -325,6 +346,58 @@ def _resolve_budget(
 
 
 # ---------------------------------------------------------------------------
+# In-flight streaming — registry and heartbeat
+# ---------------------------------------------------------------------------
+#
+# A trace with streaming enabled registers itself here while open and
+# deregisters on finish. One lazy daemon thread walks the registry and asks
+# each open trace to heartbeat-snapshot, so a trace that goes quiet (a hang,
+# a stuck tool call) still reports "running, nothing new" instead of a
+# silence indistinguishable from death. Everything else about streaming is
+# event-driven from the trace's own recording calls — the thread exists only
+# because a hung trace, by definition, stops calling anything.
+
+_STREAM_REGISTRY: Dict[int, "ActionTrace"] = {}
+_STREAM_LOCK = threading.Lock()
+_HEARTBEAT_THREAD: Optional[threading.Thread] = None
+
+# The heartbeat fires when a streaming trace has been quiet for this many
+# multiples of its throttle interval (5 × 1s default ≈ every 5s).
+_HEARTBEAT_MULTIPLE = 5
+
+
+def _stream_register(trace: "ActionTrace") -> None:
+    global _HEARTBEAT_THREAD
+    with _STREAM_LOCK:
+        _STREAM_REGISTRY[id(trace)] = trace
+        if _HEARTBEAT_THREAD is None or not _HEARTBEAT_THREAD.is_alive():
+            _HEARTBEAT_THREAD = threading.Thread(
+                target=_heartbeat_loop, name="traceact-stream-heartbeat",
+                daemon=True,
+            )
+            _HEARTBEAT_THREAD.start()
+
+
+def _stream_deregister(trace: "ActionTrace") -> None:
+    with _STREAM_LOCK:
+        _STREAM_REGISTRY.pop(id(trace), None)
+
+
+def _heartbeat_loop() -> None:
+    while True:
+        time.sleep(0.25)
+        with _STREAM_LOCK:
+            open_traces = list(_STREAM_REGISTRY.values())
+        for trace in open_traces:
+            try:
+                trace._maybe_stream_snapshot(heartbeat=True)
+            except Exception:
+                # A heartbeat must never take the process down; the worst
+                # outcome of a failed one is a missing stub line.
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Payload safety helpers
 # ---------------------------------------------------------------------------
 
@@ -355,6 +428,7 @@ def _safe_value(
     patterns: "frozenset" = SENSITIVE_PATTERNS,
     _depth: int = 0,
     _on_path: Optional[set] = None,
+    scan_values: bool = True,
 ) -> Any:
     """
     Sanitise a single value before storing it in a trace record.
@@ -423,18 +497,33 @@ def _safe_value(
             if isinstance(value, dict):
                 value = {
                     k: _safe_value(k, v, max_bytes, redact, patterns,
-                                   _depth + 1, _on_path)
+                                   _depth + 1, _on_path, scan_values)
                     for k, v in value.items()
                 }
             else:
+                # Strings inside lists never come back through _safe_value,
+                # so they get their value scan here or not at all.
                 value = [
                     _safe_value(field_name, item, max_bytes, redact, patterns,
-                                _depth + 1, _on_path)
-                    if isinstance(item, (dict, list)) else item
+                                _depth + 1, _on_path, scan_values)
+                    if isinstance(item, (dict, list))
+                    else (scan_value(item)
+                          if scan_values and isinstance(item, str)
+                          and len(item) <= max_bytes
+                          else item)
                     for item in value
                 ]
         finally:
             _on_path.discard(container_id)
+
+    # Value scan: known credential formats inside string content are replaced
+    # with "[redacted:<pattern>]" placeholders, whatever the field is called —
+    # this is the layer that catches a key in a field named "location" or
+    # pasted mid-sentence into free text. Strings over the size limit skip the
+    # scan: rule 3 below replaces them wholesale, so nothing in them survives
+    # to leak.
+    if scan_values and isinstance(value, str) and len(value) <= max_bytes:
+        value = scan_value(value)
 
     # Rule 3 & 4: Check serialisability and size. Runs on the already-
     # sanitised structure, so a "[redacted]" placeholder is tiny and never
@@ -457,6 +546,7 @@ def _sanitise_dict(
     max_bytes: int,
     redact: bool,
     patterns: "frozenset" = SENSITIVE_PATTERNS,
+    scan_values: bool = True,
 ) -> Dict[str, Any]:
     """
     Apply _safe_value to every key-value pair in a dict, recursively.
@@ -467,7 +557,8 @@ def _sanitise_dict(
     """
     on_path = {id(data)}
     return {
-        k: _safe_value(k, v, max_bytes, redact, patterns, 1, on_path)
+        k: _safe_value(k, v, max_bytes, redact, patterns, 1, on_path,
+                       scan_values)
         for k, v in data.items()
     }
 
@@ -670,6 +761,27 @@ class ActionTrace(TraceHelpersMixin):
         # previous active trace when this trace finishes.
         self._context_token: Any = None
 
+        # --- In-flight streaming state ---
+        # Parsed from the validated config spelling: None/False off, True
+        # stubs at the 1s default throttle, <seconds> stubs at that throttle,
+        # "full" full-record snapshots at the 1s default.
+        spec = self._effective_config.stream_progress
+        self._stream_mode: Optional[str] = None
+        self._stream_interval: float = 1.0
+        if spec is not None and spec is not False:
+            if spec == "full":
+                self._stream_mode = "full"
+            elif spec is True:
+                self._stream_mode = "stub"
+            else:
+                self._stream_mode = "stub"
+                self._stream_interval = float(spec)
+        self._stream_t0: float = time.monotonic()
+        self._last_stream_at: Optional[float] = None
+        self._stream_seq: int = 0
+        if self._stream_mode is not None:
+            _stream_register(self)
+
     # ------------------------------------------------------------------
     # Factory (context manager entry point)
     # ------------------------------------------------------------------
@@ -686,6 +798,7 @@ class ActionTrace(TraceHelpersMixin):
         meta: Optional[Dict[str, Any]] = None,
         config: Optional[TraceConfig] = None,
         budget: Optional[TraceBudget] = None,
+        parent: Optional[Any] = None,
     ) -> Union["ActionTrace", _NoOpTrace]:
         """
         Create a trace for use as a context manager.
@@ -700,6 +813,18 @@ class ActionTrace(TraceHelpersMixin):
                 trace.step("Validating input")
                 trace.event(kind="db", operation="insert", target="notes")
                 trace.output({"note_id": "note_123"})
+
+        ``parent`` sets the parent trace explicitly, instead of reading it
+        from the ambient context. Parent detection is normally automatic —
+        the with-block or decorator that encloses this call is the parent —
+        and that is the right default whenever the call stack reflects the
+        logical nesting. It stops being right in callback-style integrations
+        (LangChain callbacks, event handlers, executor pools), where "start"
+        and the child's own "start" fire on unrelated stacks or threads and
+        the framework hands you the parentage as data instead. Pass the
+        parent trace object there. Passing the stand-in returned for a
+        suppressed parent (disabled, sampled out, depth-capped) suppresses
+        this child the same way nesting under it would.
 
         Returns:
             An ActionTrace (if tracing is active and not sampled out) or a
@@ -716,6 +841,7 @@ class ActionTrace(TraceHelpersMixin):
             meta=meta,
             config_override=config,
             budget_override=budget,
+            parent=parent,
         )
 
     # ------------------------------------------------------------------
@@ -789,6 +915,7 @@ class ActionTrace(TraceHelpersMixin):
             "recorded_at": _now_iso(),
         })
         self._step_count += 1
+        self._maybe_stream_snapshot()
 
     def event(
         self,
@@ -848,6 +975,7 @@ class ActionTrace(TraceHelpersMixin):
                 self._effective_budget.max_payload_bytes,
                 self._effective_config.redact_by_default,
                 self._effective_config.redaction_patterns,
+                scan_values=self._effective_config.redact_values,
             )
 
         # Build the event record. Extra kwargs (rows, database, tokens_in, etc.)
@@ -888,6 +1016,12 @@ class ActionTrace(TraceHelpersMixin):
         # If the event carries an error, add it to the trace-level error summary.
         if error:
             self._add_error(evt["event_id"], error)
+            # An error snapshot skips the throttle and carries the full
+            # record: if the process dies after this, the whole story up to
+            # the failure is already on disk.
+            self._maybe_stream_snapshot(bypass_throttle=True, force_full=True)
+        else:
+            self._maybe_stream_snapshot()
 
     def touch(self, kind: str, target: str) -> None:
         """
@@ -911,6 +1045,7 @@ class ActionTrace(TraceHelpersMixin):
             trace.touch(kind="file", target="data/config.json")
         """
         self._add_touch(kind, target)
+        self._maybe_stream_snapshot()
 
     def input(self, data: Dict[str, Any]) -> None:
         """
@@ -936,6 +1071,30 @@ class ActionTrace(TraceHelpersMixin):
             self._effective_budget.max_payload_bytes,
             self._effective_config.redact_by_default,
             self._effective_config.redaction_patterns,
+            scan_values=self._effective_config.redact_values,
+        )
+        self._inputs.update(sanitised)
+        self._maybe_stream_snapshot()
+
+    def _input_transformed(self, data: Dict[str, Any]) -> None:
+        """
+        Record inputs whose values were already reduced by an explicit
+        capture transform ("card_number:last4", "user_id:hash").
+
+        Name-based redaction is bypassed for these fields — the transform IS
+        the caller's handling instruction for that field, and redacting a
+        deliberate hash to "[redacted]" would destroy the correlation value
+        that made hashing worth asking for. Everything else still applies:
+        size limits, serialisability, and the value scan (a transform output
+        can't contain a credential, but scanning costs nothing and keeps the
+        invariant simple: no string reaches a record unscanned).
+        """
+        sanitised = _sanitise_dict(
+            data,
+            self._effective_budget.max_payload_bytes,
+            False,  # no name-based redaction; see docstring
+            self._effective_config.redaction_patterns,
+            scan_values=self._effective_config.redact_values,
         )
         self._inputs.update(sanitised)
 
@@ -959,8 +1118,10 @@ class ActionTrace(TraceHelpersMixin):
             self._effective_budget.max_payload_bytes,
             self._effective_config.redact_by_default,
             self._effective_config.redaction_patterns,
+            scan_values=self._effective_config.redact_values,
         )
         self._outputs.update(sanitised)
+        self._maybe_stream_snapshot()
 
     def set_meta(self, key: str, value: Any) -> None:
         """
@@ -1031,6 +1192,97 @@ class ActionTrace(TraceHelpersMixin):
                 "message": message,
             })
 
+    # ------------------------------------------------------------------
+    # In-flight streaming
+    # ------------------------------------------------------------------
+
+    def _maybe_stream_snapshot(
+        self,
+        bypass_throttle: bool = False,
+        force_full: bool = False,
+        heartbeat: bool = False,
+    ) -> None:
+        """
+        Append a "running" snapshot of this open trace to the sinks, if the
+        streaming rules say now is the time.
+
+        The rules, in order:
+          - Grace: no snapshot at all until the trace has been open longer
+            than its throttle interval. Traces that finish inside the
+            interval — most traffic — never write a single extra byte.
+          - Throttle: at most one snapshot per interval, except an
+            error-bearing snapshot (bypass_throttle), which also carries the
+            full record: crashes are the case the detail exists for.
+          - Heartbeat: fired from the registry thread when the trace has
+            been quiet for _HEARTBEAT_MULTIPLE intervals, so a hang reads
+            as "running, nothing new since <snapshot_at>" instead of a
+            silence identical to death.
+
+        Snapshots are marked in_flight=true, carry a monotonic progress_seq,
+        and always go straight to the sinks — routing them through the
+        buffered path would hold the "live" view hostage to an exit flush,
+        which is the opposite of the point.
+        """
+        if self._stream_mode is None or self.ended_at is not None:
+            return
+        now = time.monotonic()
+        if now - self._stream_t0 < self._stream_interval:
+            return  # grace: too young to stream
+        if heartbeat:
+            reference = self._last_stream_at or self._stream_t0
+            if now - reference < self._stream_interval * _HEARTBEAT_MULTIPLE:
+                return
+        elif not bypass_throttle and self._last_stream_at is not None \
+                and now - self._last_stream_at < self._stream_interval:
+            return
+
+        self._last_stream_at = now
+        self._stream_seq += 1
+
+        if self._stream_mode == "full" or force_full:
+            record = self.to_dict()
+        else:
+            record = self._stream_stub()
+        record["in_flight"] = True
+        record["progress_seq"] = self._stream_seq
+        record["status"] = "running"
+        record["snapshot_at"] = _now_iso()
+
+        for sink in get_package_sinks():
+            try:
+                sink.write(record)
+            except Exception as e:
+                print(
+                    f"TraceAct: {type(sink).__name__}.write() failed for an "
+                    f"in-flight snapshot: {e}",
+                    file=sys.stderr,
+                )
+
+    def _stream_stub(self) -> Dict[str, Any]:
+        """
+        The slim snapshot shape: identity plus a progress cursor, ~300 bytes
+        regardless of how large the trace has grown. Full detail arrives
+        with the final record; an error snapshot carries it early. This is
+        what keeps streaming's file growth linear — a full record per
+        snapshot repeats everything before it, and a long trace would pay
+        for that repetition on every single interval.
+        """
+        return {
+            "trace_id": self.trace_id,
+            "root_trace_id": self.root_trace_id,
+            "parent_trace_id": self.parent_trace_id,
+            "correlation_id": self.correlation_id,
+            "project": self.project,
+            "action": self.action,
+            "kind": self.kind,
+            "actor": self.actor,
+            "started_at": self.started_at,
+            "steps_count": self._step_count,
+            "events_count": self._event_count,
+            "errors_count": len(self._errors),
+            "last_step": self._steps[-1]["label"] if self._steps else None,
+        }
+
     def _make_child_summary(self) -> Dict[str, Any]:
         """
         Build the compact summary that this trace sends to its parent when it
@@ -1084,6 +1336,13 @@ class ActionTrace(TraceHelpersMixin):
             status: "completed", "failed", or "cancelled".
             error:  The exception that caused failure, if status is "failed".
         """
+        # Leave the streaming registry first: ended_at set below also gates
+        # _maybe_stream_snapshot, so between these two lines a racing
+        # heartbeat can no longer write a "running" stub for a trace whose
+        # final record is about to land.
+        if self._stream_mode is not None:
+            _stream_deregister(self)
+
         # Record timing.
         ended = datetime.now(timezone.utc)
         self.ended_at = _iso(ended)
@@ -1218,6 +1477,7 @@ def _create_trace(
     operation: Optional[str] = None,
     target: Optional[str] = None,
     database: Optional[str] = None,
+    parent: Optional[Any] = None,
 ) -> Union[ActionTrace, _NoOpTrace]:
     """
     Shared factory for creating an ActionTrace (or returning a _NoOpTrace when
@@ -1267,11 +1527,26 @@ def _create_trace(
         if correlation_id is None:
             correlation_id = _INCOMING_CORRELATION_ID.get()
 
+    # --- Parent resolution ---
+    # An explicit parent (callback-style integrations, where the framework
+    # hands parentage over as data) takes the place of the ambient context
+    # entirely: the contextvar belongs to whatever stack the callback happens
+    # to run on, which has nothing to do with this trace's logical parent.
+    current = get_active_trace()
+    explicit_parent = parent is not None
+    # An explicit parent that isn't a real ActionTrace is the stand-in for a
+    # suppressed one (disabled, sampled out, depth-capped). Its children are
+    # suppressed with it below, exactly as nested traces follow the skip
+    # sentinel — a kept child under a dropped parent would surface in the
+    # sink as an orphan root.
+    suppressed_parent = explicit_parent and not isinstance(parent, ActionTrace)
+    if suppressed_parent:
+        parent = None
+    elif not explicit_parent:
+        parent = current if isinstance(current, ActionTrace) else None
+
     # --- Check 1: is tracing enabled? ---
     # Resolve config first so we can check the enabled flag.
-    current = get_active_trace()
-    parent: Optional[ActionTrace] = current if isinstance(current, ActionTrace) else None
-
     effective_config = _resolve_config(config_override, parent)
     if not effective_config.enabled:
         return _NoOpTrace()
@@ -1298,8 +1573,11 @@ def _create_trace(
     # we must also skip — but with always_trace_errors on, a failure in this
     # frame still needs a record, exactly as it would produce one per traced
     # frame in an unsampled run. A promote-capable _SkippedTrace provides that;
-    # re-pushing SKIP over SKIP is harmless.
-    if is_skip(current):
+    # re-pushing SKIP over SKIP is harmless. An explicitly passed suppressed
+    # parent is the same situation arriving as an argument instead of via the
+    # context, and gets the same treatment; an explicit real parent bypasses
+    # the context check entirely (the ambient context is some other stack's).
+    if suppressed_parent or (not explicit_parent and is_skip(current)):
         if effective_budget.always_trace_errors:
             return _SkippedTrace(_promote_info())
         return _NoOpTrace()

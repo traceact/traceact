@@ -709,6 +709,10 @@ _KIND_TO_OTLP: Dict[str, int] = {
     "email":   _OTLP_KIND_PRODUCER,
     "export":  _OTLP_KIND_PRODUCER,
     "job":     _OTLP_KIND_CONSUMER,
+    # Deliberately absent: "tool" → INTERNAL (the default). OTel's GenAI
+    # semantic conventions specify execute-tool spans as INTERNAL — the tool
+    # runs inside the agent's process; any network call it makes is its own
+    # CLIENT span.
 }
 
 # Map TraceAct `status` to OTel StatusCode.

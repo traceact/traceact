@@ -11,15 +11,29 @@
 # leaf module with no imports from the rest of the package is the simplest
 # fix: both sides import from here, and this module depends on nothing.
 #
-# What "redaction" means here:
-# Matching is by FIELD NAME, not by value content. A field named "password" is
-# redacted regardless of what it holds; a field named "output" holding an
-# actual password string is not caught, because nothing here inspects value
-# content. This is a real, documented limitation (see USAGE.md) — it keeps the
-# mechanism simple, fast, and false-positive-free, at the cost of not catching
-# secrets stored under an unexpected key.
+# Two mechanisms live here:
+#
+# 1. FIELD-NAME matching (SENSITIVE_PATTERNS, REDACTION_PRESETS): a field
+#    named "password" is redacted regardless of what it holds. Simple, fast,
+#    false-positive-free — and blind to a secret stored under an unexpected
+#    key.
+#
+# 2. VALUE-PATTERN matching (VALUE_PATTERNS): captured string values are
+#    scanned for the wire formats of known credential types — an AWS key is
+#    AKIA followed by 16 characters wherever it appears, whatever its field
+#    is called. This closes exactly the hole field-name matching leaves: a
+#    key pasted into a field named "location", or embedded mid-sentence in
+#    free text. Only formats with distinctive, near-unmistakable signatures
+#    are listed, which is why this can default to ON; entropy-style guessing
+#    (which would catch novel secrets at the price of mangling ordinary
+#    hashes and IDs) is deliberately absent.
+#
+# The value-pattern registry is documented in USAGE.md ("Value-pattern
+# redaction") — keep the two in sync when extending it, and extend it when a
+# new adapter or provider introduces a credential format not covered here.
 
-from typing import FrozenSet
+import re
+from typing import FrozenSet, List, Tuple
 
 # Always active whenever redact_by_default (or a decorator/trace override) is
 # True. Chosen to be broad via substring matching: "user_password" matches
@@ -73,3 +87,64 @@ REDACTION_PRESETS: dict = {
         "completion", "generation", "output_text",
     }),
 }
+
+
+# ---------------------------------------------------------------------------
+# Value patterns — content scanning for known credential formats
+# ---------------------------------------------------------------------------
+#
+# Each entry is (name, compiled regex). The name appears in the placeholder a
+# match is replaced with — "[redacted:aws-key]" — so a redaction reads as the
+# near-miss it is, not as missing data. Matching replaces only the matched
+# substring: prose around an embedded secret survives.
+#
+# Admission rule for this list: the format must be distinctive enough that a
+# match is almost certainly a credential. A 40-character base64 string is not
+# admissible (it describes half the hashes in any system); AKIA + 16 chars is.
+# When a new provider or tool introduces a keyed format, add it here AND to
+# the table in USAGE.md.
+
+VALUE_PATTERNS: List[Tuple[str, "re.Pattern"]] = [
+    # AWS access key IDs (long-term AKIA..., temporary ASIA...).
+    ("aws-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    # "sk-" style secret keys: OpenAI (sk-...), Anthropic (sk-ant-...),
+    # Stripe (sk_live_..., sk_test_...).
+    ("sk-token", re.compile(r"\bsk[-_][A-Za-z0-9_-]{16,}\b")),
+    # GitHub tokens: classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained.
+    ("github-token", re.compile(
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
+    # Slack tokens (bot, app, user, refresh...).
+    ("slack-token", re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{10,}\b")),
+    # JSON Web Tokens: three base64url segments, header always starts {"...
+    # which encodes to eyJ.
+    ("jwt", re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
+    # PEM private key blocks. The header alone is enough to redact on.
+    ("pem-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    # Google API keys.
+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    # Authorization header values captured whole ("Bearer <token>").
+    ("bearer-token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    # Credentials embedded in a URL: scheme://user:password@host.
+    ("url-credentials", re.compile(r"://[^/\s:@]{1,128}:[^/\s@]{1,256}@")),
+]
+
+
+def scan_value(text: str) -> str:
+    """
+    Replace every known credential format in a string with its
+    "[redacted:<name>]" placeholder. Text without matches is returned
+    unchanged (the common case costs one failed search per pattern).
+    """
+    for name, pattern in VALUE_PATTERNS:
+        if pattern.search(text):
+            text = pattern.sub(f"[redacted:{name}]", text)
+    return text
+
+
+def find_value_patterns(text: str) -> List[str]:
+    """
+    The names of every credential format present in a string, in registry
+    order, without modifying anything. Backs `traceact doctor --scan`.
+    """
+    return [name for name, pattern in VALUE_PATTERNS if pattern.search(text)]

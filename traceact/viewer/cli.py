@@ -121,6 +121,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="A .jsonl file or folder to validate (optional).",
     )
+    doctor.add_argument(
+        "--scan", action="store_true",
+        help="Scan the source's files for known credential formats (AWS "
+             "keys, sk- tokens, JWTs, PEM blocks, ...) — the same registry "
+             "that redacts captured values at trace time, run over what is "
+             "already on disk. Requires SOURCE. Found secrets fail the check.",
+    )
     doctor.set_defaults(handler=_run_doctor)
 
     return parser
@@ -254,7 +261,16 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
     Returns 0 if every check that can fail passed, 1 otherwise. A missing
     running viewer is never a failure by itself (reported as "info").
+
+    With --scan, additionally runs the credential scan over the source's
+    files; any finding fails the run.
     """
+    if getattr(args, "scan", False):
+        if args.source is None:
+            print("doctor --scan needs a SOURCE to scan.", file=sys.stderr)
+            return 1
+        return _run_scan(args.source)
+
     result = _doctor.run_checks(args.source)
 
     print("traceact doctor")
@@ -273,6 +289,45 @@ def _run_doctor(args: argparse.Namespace) -> int:
     else:
         print("Some checks failed — see above.", file=sys.stderr)
     return 0 if result["ok"] else 1
+
+
+def _run_scan(source: str) -> int:
+    """
+    Render doctor.scan_source() as a text report. Exit 0 when clean, 1 when
+    anything was found — a planted secret in trace data is a failure, full
+    stop, so the exit code is scriptable in CI.
+    """
+    result = _doctor.scan_source(source)
+
+    print("traceact doctor --scan")
+    print()
+    print(f"  Scanned {result['lines']} line(s) across "
+          f"{result['files']} file(s).")
+    print()
+
+    if result["ok"]:
+        print("  ✓  No known credential formats found.")
+        return 0
+
+    for hit in result["hits"]:
+        print(f"  ✗  {hit['pattern']}  {hit['file']}:{hit['line']}")
+    if result["hits_capped"]:
+        print("  …  more findings exist; output capped at "
+              f"{len(result['hits'])}.")
+    print()
+    print(
+        f"{len(result['hits'])}{'+' if result['hits_capped'] else ''} "
+        "credential-shaped value(s) found — see above.",
+        file=sys.stderr,
+    )
+    print(
+        "These are already on disk: rotate the credentials if they are "
+        "live, and delete or rewrite the affected files. Records written "
+        "from now on are covered by value-pattern redaction "
+        "(TraceConfig(redact_values=True), the default).",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _start_server(host: str, port: int, state: ViewerState,

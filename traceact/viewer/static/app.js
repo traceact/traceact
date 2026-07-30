@@ -240,7 +240,23 @@ function openStream(name) {
       }
     } else if (msg.kind === "append") {
       // New traces arrive oldest-first; prepend so newest ends up on top.
-      for (const t of msg.traces) state.traces.unshift(t);
+      // An arrival whose trace_id is already displayed supersedes that row
+      // in place — that's how an in-flight "running" stub updates as the
+      // trace progresses and flips to its final record when it finishes,
+      // instead of stacking one row per snapshot.
+      for (const t of msg.traces) {
+        const idx = state.traces.findIndex(
+          (x) => x.trace_id === t.trace_id);
+        if (idx >= 0) {
+          state.traces[idx] = t;
+          if (state.selected && state.selected.trace_id === t.trace_id) {
+            state.selected = t;
+            renderInspector();
+          }
+        } else {
+          state.traces.unshift(t);
+        }
+      }
       if (state.traces.length > state.settings.limit) {
         state.traces.length = state.settings.limit;
       }

@@ -48,6 +48,7 @@
 
 import copy
 import functools
+import hashlib
 import inspect
 from typing import Any, Dict, List, Optional, Union
 
@@ -200,6 +201,12 @@ def traced_action(
         # keeps working as TraceConfig gains new fields in the future.
         resolved_config = config
         if capture_inputs is not None:
+            # Constructing a throwaway TraceConfig first runs the same
+            # validation the explicit config=TraceConfig(...) route gets —
+            # a typo'd transform ("x:frobnicate") fails here, loudly, at
+            # decoration time, instead of silently skipping capture on
+            # every call.
+            TraceConfig(capture_inputs=capture_inputs)
             resolved_config = copy.copy(config) if config is not None else TraceConfig()
             resolved_config.capture_inputs = capture_inputs
 
@@ -419,6 +426,42 @@ def _async_wrapper(
 # Input capture
 # ---------------------------------------------------------------------------
 
+def _apply_transform(value: Any, transform: str) -> Any:
+    """
+    Reduce a captured value per its "field:transform" capture spec.
+
+    Transforms exist for fields where the raw value must not be stored but
+    dropping it entirely loses debugging utility:
+
+        hash   — "sha256:1a2b3c4d5e6f". Deterministic and unsalted, so the
+                 same input hashes identically across traces and processes:
+                 a hashed user ID still correlates one user's traces. This
+                 is pseudonymisation, not encryption — anyone holding a
+                 candidate value can hash it and compare.
+        last4  — "…6789". The tail that support flows already use for card
+                 and account numbers.
+        length — "[2048 chars]" / "[len 14]". Presence and size, no content.
+
+    Transform names are validated at TraceConfig construction, so an
+    unknown one can't reach here through the public API.
+    """
+    if transform == "hash":
+        raw = value if isinstance(value, str) else repr(value)
+        digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+        return f"sha256:{digest[:12]}"
+    if transform == "last4":
+        text = str(value)
+        return "…" + text[-4:] if len(text) > 4 else text
+    if transform == "length":
+        if isinstance(value, str):
+            return f"[{len(value)} chars]"
+        try:
+            return f"[len {len(value)}]"
+        except TypeError:
+            return f"[{type(value).__name__}]"
+    raise ValueError(f"Unknown capture transform: {transform!r}")
+
+
 def _capture_inputs(
     trace: ActionTrace,
     func: Any,
@@ -468,14 +511,31 @@ def _capture_inputs(
                 bound[param_names[i]] = val
         bound.update(kwargs)
 
-        # If capture_spec is a list, keep only the explicitly requested fields.
-        # This is the safest form: the developer chose exactly what to record.
+        # If capture_spec is a list, keep only the explicitly requested
+        # fields. This is the safest form: the developer chose exactly what
+        # to record. An entry may carry a transform ("card_number:last4"),
+        # in which case the reduced value is stored instead of the raw one.
         if isinstance(capture_spec, list):
-            bound = {k: v for k, v in bound.items() if k in capture_spec}
+            plain, transformed = {}, {}
+            for entry in capture_spec:
+                field, _, transform = entry.partition(":")
+                if field not in bound:
+                    continue
+                if transform:
+                    transformed[field] = _apply_transform(bound[field],
+                                                          transform)
+                else:
+                    plain[field] = bound[field]
+            if transformed:
+                # Transformed values bypass name-based redaction: the
+                # transform is the explicit handling instruction for that
+                # field. Size limits and value scanning still apply.
+                trace._input_transformed(transformed)
+            if plain:
+                trace.input(plain)
+            return
 
-        # If capture_spec is True, keep everything (already in bound).
-        # We do not need an elif here — the list branch has already filtered.
-
+        # capture_spec is True: keep everything.
         if not bound:
             return
 

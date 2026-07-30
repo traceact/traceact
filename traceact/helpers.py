@@ -101,3 +101,29 @@ class TraceHelpersMixin:
             trace.model(operation="completion", target="claude-sonnet-5", tokens_in=800)
         """
         self.event(kind="model", operation=operation, target=target, **kwargs)
+
+    def tool(self, operation: str, target: str, **kwargs: Any) -> None:
+        """
+        Record a tool call event — an agent (or any orchestrator) invoking a
+        named capability: a search function, a code interpreter, a calculator,
+        an MCP tool, a plugin.
+
+        Equivalent to: trace.event(kind="tool", operation=operation, target=target, ...)
+
+        Distinct from trace.model(): the model call is the LLM inference
+        itself; the tool call is what the agent does between inferences. An
+        agent turn typically records one model event and zero or more tool
+        events, and telling those apart is the whole point of tracing an
+        agent — "which tool did it pick, and what happened" is the question.
+
+        Args:
+            operation: What was done with the tool. Standard values: call,
+                       lookup, execute.
+            target:    The tool's name. Example: "web_search", "python_repl".
+            **kwargs:  Additional fields such as duration_ms=840,
+                       result={"rows": 3}, status="failed", error={...}.
+
+        Example:
+            trace.tool(operation="call", target="web_search", duration_ms=840)
+        """
+        self.event(kind="tool", operation=operation, target=target, **kwargs)

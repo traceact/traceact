@@ -380,6 +380,14 @@ class TraceLog:
         for filepath in _jsonl_files(self._path):
             newest_buf: Deque[Dict[str, Any]] = deque(maxlen=n)
             oldest_matches: List[Dict[str, Any]] = []
+            # In-flight stub handling, same shape as _read_matching(): hold
+            # the latest stub per still-open trace, surface it only if no
+            # final record supersedes it by end of file. A scan that stops
+            # early (cap hit, oldest-n found its n) skips the flush — an
+            # incomplete scan can't know which stubs are truly unsuperseded.
+            pending: Dict[str, Dict[str, Any]] = {}
+            finalized: set = set()
+            stopped_early = False
 
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -390,10 +398,21 @@ class TraceLog:
                             and lines_scanned > self._max_lines_scanned
                         ):
                             capped = True
+                            stopped_early = True
                             break
 
                         obj = _parse_line(line)
-                        if obj is None or not _passes(obj, self._predicates):
+                        if obj is None:
+                            continue
+                        tid = obj.get("trace_id")
+                        if obj.get("in_flight"):
+                            if tid is not None and tid not in finalized:
+                                pending[tid] = obj
+                            continue
+                        if tid is not None:
+                            finalized.add(tid)
+                            pending.pop(tid, None)
+                        if not _passes(obj, self._predicates):
                             continue
 
                         total_matches += 1
@@ -402,10 +421,20 @@ class TraceLog:
                         else:
                             oldest_matches.append(obj)
                             if len(oldest_matches) >= n:
+                                stopped_early = True
                                 break
             except OSError:
                 # A file that vanished or can't be read is silently skipped.
                 continue
+
+            if not stopped_early:
+                for obj in pending.values():
+                    if _passes(obj, self._predicates):
+                        total_matches += 1
+                        if newest:
+                            newest_buf.append(obj)
+                        else:
+                            oldest_matches.append(obj)
 
             candidates.extend(newest_buf if newest else oldest_matches)
             if capped:
@@ -433,15 +462,38 @@ class TraceLog:
         """
         results: List[Dict[str, Any]] = []
         for filepath in _jsonl_files(self._path):
+            # In-flight streaming appends "running" stubs that the final
+            # record supersedes. Stubs are held per-file (latest wins) and
+            # surface only if no final record ever arrives — which is
+            # exactly the crashed-trace case the stubs exist to preserve.
+            # Memory here is bounded by the number of traces still open in
+            # that file, not by file size. The finalized set records every
+            # final trace_id, predicate match or not: a stub must never
+            # outlive its final just because the final was filtered out.
+            pending: Dict[str, Dict[str, Any]] = {}
+            finalized: set = set()
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     for line in f:
                         obj = _parse_line(line)
-                        if obj is not None and _passes(obj, self._predicates):
+                        if obj is None:
+                            continue
+                        tid = obj.get("trace_id")
+                        if obj.get("in_flight"):
+                            if tid is not None and tid not in finalized:
+                                pending[tid] = obj
+                            continue
+                        if tid is not None:
+                            finalized.add(tid)
+                            pending.pop(tid, None)
+                        if _passes(obj, self._predicates):
                             results.append(obj)
             except OSError:
                 # A file that vanished or can't be read is silently skipped.
                 continue
+            for obj in pending.values():
+                if _passes(obj, self._predicates):
+                    results.append(obj)
         return results
 
 

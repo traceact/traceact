@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceact"
-version = "0.11.0"
+version = "0.12.0"
 description = "X-ray vision for your code. Lightweight action-level tracing for Python."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -51,6 +51,11 @@ dev = [
     "starlette>=0.36",
     "django>=4.2",
     "requests>=2.31",
+    # Real framework objects for the LangChain adapter tests
+    # (traceact.integrations.langchain). Same rationale as above: the
+    # adapter is exercised through langchain-core's own callback dispatch
+    # (fake models, real tools, real runnables), not hand-built dicts.
+    "langchain-core>=0.2",
 ]
 
 [project.urls]

@@ -2,6 +2,24 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.12.0] — 2026-07-30
+
+### Added
+
+- **Tool-call tracking.** New standard event kind `"tool"` with a `trace.tool(operation, target, ...)` helper, a `tool` touch kind, and OTLP export as INTERNAL spans per OTel's GenAI conventions. The model call is the inference; the tool call is what the agent does between inferences — an agent turn typically records one model event and several tool events, and telling them apart is the point of tracing an agent.
+
+- **Explicit parenting: `ActionTrace.start(parent=...)`.** Parent detection is normally ambient (the enclosing with-block or decorator). Callback-style frameworks break that premise: start and end fire on unrelated stacks and parentage arrives as data. The `parent=` argument accepts it as data. The argument wins over the ambient context; a suppressed parent (disabled, sampled out, depth-capped) suppresses its children, so sampling containment holds; `__exit__` on a never-entered trace finalises the record without touching the context stack, making the pattern thread-safe.
+
+- **LangChain adapter — the first agent framework adapter.** `traceact.integrations.langchain.TraceActCallbackHandler` turns chain, LLM, tool, and retriever runs into traces with correct parent links (via `run_id`/`parent_run_id`) and one shared correlation ID per top-level run. Prompt and response text is not recorded by default; `capture_content=True` opts in and still flows through redaction. Zero-dependency positioning intact: `langchain-core` is imported only when the adapter module is, with a clear error naming the missing package. Tested through LangChain's own dispatch (fake models, real tools, real runnables), not hand-built callbacks — which also caught that langchain-core 1.x passes `serialized=None` and delivers run names as kwargs.
+
+- **Value-pattern redaction, on by default.** A second redaction layer that scans captured string *content* for the wire formats of known credential types — AWS keys, `sk-`/`sk_` tokens (OpenAI, Anthropic, Stripe), GitHub and Slack tokens, JWTs, PEM private key blocks, Google API keys, `Bearer` values, and credentials embedded in URLs. Matches become named placeholders (`[redacted:aws-key]`) with surrounding prose intact, closing the hole field-name matching leaves: a key in a field named `location`, or pasted mid-sentence into free text. Only formats distinctive enough to make false positives unlikely are admitted, which is what makes default-on safe; the registry (`traceact.redaction.VALUE_PATTERNS`) is documented in USAGE.md and pinned pattern-by-pattern by the test suite. Disable with `TraceConfig(redact_values=False)`. The deeper recursion this required also closes a redaction hole: dicts nested in lists-of-lists are now redacted by field name too.
+
+- **Capture transforms.** A list-form capture spec can name a transform per field: `capture_inputs=["amount", "user_id:hash", "card_number:last4"]`. `hash` stores a deterministic sha256 prefix (the same value hashes identically across traces and processes, so a hashed ID still correlates — pseudonymisation, not encryption), `last4` keeps the tail, `length` keeps size only. A transform overrides field-name redaction for its field — it is the caller's explicit handling instruction, and redacting a deliberate hash would destroy the correlation that justified it. Unknown transform names raise `ValueError` at construction or decoration time, never silently at capture time.
+
+- **`traceact doctor --scan SOURCE`.** Runs the value-pattern registry over trace files already on disk and reports each finding with pattern, file, and line. Capture-time scanning protects records written from now on; this audits the past. Exits 0 when clean, 1 on any finding — a CI gate in one flag.
+
+- **In-flight trace streaming, opt-in.** `TraceConfig(stream_progress=True | <seconds> | "full")`, resolvable per decorator. While a streaming trace is open it appends slim `"running"` stub lines (~300 bytes: identity plus step/event/error counts and the last step label, `in_flight: true`, monotonic `progress_seq`); the final record supersedes them. Write rules: a grace threshold equal to the throttle interval (fast traces write nothing extra, ever), at most one stub per interval, a heartbeat at 5× the interval so a hung trace keeps reporting, and error-bearing snapshots that bypass the throttle and carry the full record. Readers collapse stubs last-wins per `trace_id`: the viewer shows one row that updates in place and flips to final; `TraceLog` returns the final record, or the latest stub for a trace that never finished. That orphaned stub is the crash evidence — a `SIGKILL` mid-trace previously lost the trace entirely; now the last snapshot on disk says how far it got.
+
 ## [0.11.0] — 2026-07-29
 
 ### Changed

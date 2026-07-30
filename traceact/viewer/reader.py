@@ -129,7 +129,10 @@ class SourceReader:
                 # A file that vanished or can't be opened is simply skipped.
                 continue
 
-        traces = list(ring)
+        # In-flight streaming writes "running" stub lines that the final
+        # record supersedes. JSONL append order makes last-wins per trace_id
+        # correct: within a file the final always follows its stubs.
+        traces = _dedupe_in_flight(list(ring))
         traces.sort(key=_started_at_key, reverse=True)
         return traces
 
@@ -195,12 +198,40 @@ class SourceReader:
             # start and refreshes both _offsets and _inodes.
             return {"kind": "snapshot", "traces": self.snapshot(limit)}
 
-        return {"kind": "append", "traces": fresh}
+        # One poll window can contain several snapshots of the same open
+        # trace (or a stub plus its final record); only the latest is sent.
+        # Cross-poll supersession is the client's job — it replaces a row it
+        # has already rendered when a newer record for that trace_id arrives.
+        return {"kind": "append", "traces": _dedupe_in_flight(fresh)}
 
 
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+def _dedupe_in_flight(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Collapse in-flight snapshots to one record per trace_id, keeping the
+    latest occurrence (which, given JSONL append order, is either the newest
+    stub or the final record that supersedes them all). Records without a
+    trace_id — nothing TraceAct writes, but tolerated input — pass through
+    untouched. Order of the surviving records is preserved.
+    """
+    # Fast path: no in-flight lines, nothing to collapse. This keeps the
+    # overwhelmingly common non-streaming source at zero extra allocations.
+    if not any(t.get("in_flight") for t in traces):
+        return traces
+
+    latest_index: Dict[str, int] = {}
+    for i, trace in enumerate(traces):
+        tid = trace.get("trace_id")
+        if tid is not None:
+            latest_index[tid] = i
+    return [
+        t for i, t in enumerate(traces)
+        if t.get("trace_id") is None or latest_index[t["trace_id"]] == i
+    ]
+
 
 def _parse_line(line: str) -> Optional[Dict[str, Any]]:
     """

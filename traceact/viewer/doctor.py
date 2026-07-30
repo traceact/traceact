@@ -114,6 +114,69 @@ def run_checks(source: Optional[str] = None) -> Dict[str, Any]:
     return {"ok": ok, "version": __version__, "checks": checks}
 
 
+def scan_source(path: str) -> Dict[str, Any]:
+    """
+    Scan a source's files for known credential formats (the same
+    redaction.VALUE_PATTERNS registry that redacts captured values at trace
+    time) and report what is sitting in them.
+
+    Capture-time scanning protects records written from now on; this audits
+    the ones already on disk — traces written before value scanning existed,
+    with redact_values off, or by an older TraceAct. A hit means a secret is
+    in the file right now, whatever the viewer or exporter does about it.
+
+    Returns:
+        {
+            "ok": bool,          # True when nothing was found
+            "files": int,        # files scanned
+            "lines": int,        # lines scanned
+            "hits": [            # one entry per finding, capped
+                {"pattern": str, "file": str, "line": int},
+                ...
+            ],
+            "hits_capped": bool, # True if more findings exist than listed
+        }
+    """
+    from traceact.redaction import find_value_patterns
+
+    max_hits = 100
+    hits: List[Dict[str, Any]] = []
+    files = _jsonl_files(path) if os.path.exists(path) else []
+    lines_scanned = 0
+    capped = False
+
+    for filepath in files:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for lineno, line in enumerate(f, start=1):
+                    if not line.strip():
+                        continue
+                    lines_scanned += 1
+                    for pattern_name in find_value_patterns(line):
+                        if len(hits) >= max_hits:
+                            capped = True
+                            break
+                        hits.append({
+                            "pattern": pattern_name,
+                            "file": filepath,
+                            "line": lineno,
+                        })
+                    if capped:
+                        break
+        except OSError:
+            continue
+        if capped:
+            break
+
+    return {
+        "ok": not hits,
+        "files": len(files),
+        "lines": lines_scanned,
+        "hits": hits,
+        "hits_capped": capped,
+    }
+
+
 def _check_source(path: str) -> Dict[str, str]:
     """
     Validate a source path: it must exist and contain at least one .jsonl

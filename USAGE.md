@@ -21,6 +21,10 @@ traceact/
                     _INCOMING_TRACE_ID ContextVar for cross-service correlation
   middleware.py   — TraceActMiddleware (WSGI), TraceActASGIMiddleware (ASGI)
 
+  integrations/   — optional framework adapters; nothing here is imported by
+    langchain.py    the top-level package, so traceact stays zero-dependency.
+                    TraceActCallbackHandler (requires langchain-core)
+
   viewer/
     cli.py        — `traceact view` / `traceact show` / `traceact doctor` CLI entry point
     server.py     — stdlib ThreadingHTTPServer; SPA + REST + SSE
@@ -63,6 +67,8 @@ tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 21. [Viewing traces](#viewing-traces)
 22. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
 23. [Distributed propagation](#distributed-propagation)
+24. [Tracing agents](#tracing-agents)
+25. [In-flight streaming](#in-flight-streaming)
 
 ---
 
@@ -205,6 +211,18 @@ The `with` block:
 
 Any `@traced_action` calls made inside the `with` block automatically become child traces.
 
+**Explicit parenting (`parent=`).** Parent detection is normally automatic: the enclosing with-block or decorated call is the parent. That stops working in callback-style integrations (LangChain callbacks, event handlers, executor pools), where "start" and "end" fire on unrelated stacks and the framework hands you the parentage as data instead. Pass the parent trace object explicitly:
+
+```python
+parent = ActionTrace.start(action="chain.run")
+child  = ActionTrace.start(action="model.call", kind="model", parent=parent)
+# ... later, on whatever stack the callbacks arrive:
+child.__exit__(None, None, None)
+parent.__exit__(None, None, None)
+```
+
+The argument wins over the ambient context when both exist. Passing the stand-in returned for a suppressed parent (disabled, sampled out, depth-capped) suppresses the child the same way nesting under it would — sampling containment holds either way. `__exit__` on a never-entered trace finalises the record without touching the context stack, which is what makes this safe across threads.
+
 ---
 
 ## Recording steps
@@ -253,6 +271,7 @@ trace.event(
 | `"http"` | HTTP calls to external services |
 | `"file"` | File reads, writes, deletes |
 | `"model"` | LLM / AI model calls |
+| `"tool"` | An agent invoking a named capability: search, code interpreter, MCP tool |
 | `"cache"` | Cache reads and writes |
 | `"queue"` | Queue publishes and consumes |
 | `"auth"` | Authentication and authorisation |
@@ -285,6 +304,11 @@ trace.file(operation="read", target="config/settings.yaml")
 # Model
 trace.model(operation="completion", target="claude-sonnet-5", tokens_in=800, tokens_out=200)
 trace.model(operation="embedding", target="text-embedding-3-small")
+
+# Tool — what an agent does between model calls. Distinct from trace.model():
+# the model call is the inference; the tool call is the capability it picked.
+trace.tool(operation="call", target="web_search", duration_ms=840)
+trace.tool(operation="execute", target="python_repl", status="failed", error={...})
 ```
 
 All helpers use `target` as the resource field name. Aliases like `table`, `url`, or `path` aren't accepted.
@@ -352,6 +376,7 @@ trace.touch(kind="http_endpoint", target="stripe")
 | `"queue"` | `"queue"` |
 | `"auth"` | `"auth_provider"` |
 | `"email"` | `"email_service"` |
+| `"tool"` | `"tool"` |
 
 ---
 
@@ -645,7 +670,68 @@ def export_report(...):
     ...
 ```
 
-**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name.
+**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name. That hole is what value-pattern redaction (below) exists to close.
+
+### Value-pattern redaction
+
+A second, independent layer that scans captured string **content** for the wire formats of known credential types — on by default. An AWS key is `AKIA` plus 16 characters wherever it appears, whatever its field is called, so it gets caught in a field named `location`, pasted mid-sentence into free text, or sitting inside a list of CLI arguments. Matches are replaced with a named placeholder; the text around them survives:
+
+```python
+trace.input({"note": "call failed using key AKIA..."})
+# stored as: {"note": "call failed using key [redacted:aws-key]"}
+```
+
+**The registry.** Only formats with distinctive, near-unmistakable signatures are admitted — that is what makes default-on safe. A 40-character base64 string is not admissible (it describes half the hashes in any system); `AKIA` + 16 characters is. Entropy-style guessing is deliberately absent.
+
+| Pattern name | Catches |
+|---|---|
+| `aws-key` | AWS access key IDs (`AKIA…`, temporary `ASIA…`) |
+| `sk-token` | `sk-`/`sk_` secret keys: OpenAI, Anthropic, Stripe (`sk_live_…`, `sk_test_…`) |
+| `github-token` | GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, fine-grained `github_pat_…`) |
+| `slack-token` | Slack tokens (`xoxb-`, `xoxp-`, `xoxa-`, …) |
+| `jwt` | JSON Web Tokens (three base64url segments starting `eyJ`) |
+| `pem-key` | PEM private key blocks (`-----BEGIN … PRIVATE KEY-----`) |
+| `google-api-key` | Google API keys (`AIza` + 35 characters) |
+| `bearer-token` | Whole captured `Authorization` values (`Bearer <token>`) |
+| `url-credentials` | Credentials embedded in URLs (`scheme://user:password@host`) |
+
+The registry lives in `traceact.redaction.VALUE_PATTERNS`. When a new provider, tool, or adapter introduces a keyed credential format, add it there **and to this table** — the two are kept in sync deliberately, and the test suite pins every registered pattern to a covering test.
+
+**Turning it off** (per package or per decorator, like any config field):
+
+```python
+configure(config=TraceConfig(redact_values=False))
+```
+
+Value scanning applies everywhere the field-name mechanism does: `trace.input()`, `trace.output()`, event `result` values, and captured arguments — including strings nested in lists and dicts. Values over `max_payload_bytes` skip the scan because truncation replaces them entirely; nothing in them survives to leak.
+
+To audit trace files **already on disk** with the same registry, see `traceact doctor --scan` under [Health checks](#health-checks-traceact-doctor).
+
+### Capture transforms
+
+For fields where the raw value must not be stored but dropping it entirely loses debugging utility, a list-form capture spec can name a transform after the field:
+
+```python
+@traced_action(
+    action="payment.charge",
+    capture_inputs=["amount", "user_id:hash", "card_number:last4"],
+)
+def charge(amount, user_id, card_number):
+    ...
+# stored inputs: {"amount": 99.0, "user_id": "sha256:1a2b3c4d5e6f", "card_number": "…4242"}
+```
+
+| Transform | Stores | Use for |
+|---|---|---|
+| `hash` | `sha256:1a2b3c4d5e6f` — deterministic, unsalted | IDs you want to correlate across traces without storing them |
+| `last4` | `…4242` | Card and account numbers, the tail support flows already use |
+| `length` | `[2048 chars]` | Presence and size of a payload, no content |
+
+Notes that matter:
+
+- **A transform overrides field-name redaction for that field.** `card_number` matches the sensitive patterns and would normally store `[redacted]`; naming a transform is the explicit handling instruction for the field, so the transformed value is kept. Size limits and value scanning still apply to it.
+- **`hash` is pseudonymisation, not encryption.** It is deterministic and unsalted so the same value hashes identically across traces and processes — which is what makes a hashed user ID correlatable, and also means anyone holding a candidate value can hash it and compare.
+- An unknown transform name raises `ValueError` immediately — at `TraceConfig(...)` construction or at decoration time — never silently at capture time.
 
 **Nested redaction example:**
 
@@ -1136,6 +1222,8 @@ TraceConfig(
     redact_by_default=True,    # True: apply redaction to captured inputs/outputs
     capture_inputs=False,      # global default; False = global kill switch
     capture_outputs=True,      # whether trace.output() records anything
+    redact_values=True,        # scan captured string content for credential formats
+    stream_progress=None,      # in-flight streaming: True | <seconds> | "full"
 )
 ```
 
@@ -1358,6 +1446,14 @@ All checks passed.
 ```
 
 Exits `0` if every check that can fail passed, `1` otherwise. A missing running viewer is never treated as a failure.
+
+**`--scan` — audit trace files for credentials already on disk:**
+
+```bash
+traceact doctor data/traces/ --scan
+```
+
+Runs the [value-pattern registry](#value-pattern-redaction) over every line of the source and reports each finding with its pattern name, file, and line number. Capture-time scanning protects records written from now on; this audits the past — traces written before value scanning existed, with `redact_values=False`, or by an older TraceAct. Exits `0` when clean and `1` on any finding, so it drops into CI as a gate. A finding means the secret is in the file right now: rotate the credential if it's live, then delete or rewrite the affected file.
 
 ### Single-instance behaviour
 
@@ -1747,6 +1843,128 @@ which form you pass.
 
 WSGI: the header arrives as `HTTP_TRACEACT_TRACE_ID` in the environ.
 ASGI: the header arrives as bytes in `scope["headers"]`.
+
+---
+
+## Tracing agents
+
+Agent workloads have their own shape: one turn is a model call plus zero or
+more tool calls, orchestrated by a framework whose callbacks fire on stacks
+that have nothing to do with the logical nesting. TraceAct covers this with
+three pieces: the `"tool"` event kind (`trace.tool()`), explicit parenting
+(`ActionTrace.start(parent=...)`), and framework adapters.
+
+### LangChain
+
+```python
+from traceact.integrations.langchain import TraceActCallbackHandler
+
+handler = TraceActCallbackHandler()
+chain.invoke(inputs, config={"callbacks": [handler]})
+```
+
+Requires `langchain-core` — but only when you import the adapter module.
+`import traceact` stays zero-dependency; the adapter raises a clear
+ImportError naming the missing package if it isn't installed.
+
+What maps to what:
+
+| LangChain run | TraceAct trace |
+|---|---|
+| chain / runnable | `kind="app"`, action `chain.<name>` |
+| LLM / chat model | `kind="model"`, action `model.<name>`, plus a model event with token counts |
+| tool | `kind="tool"`, action `tool.<name>`, plus a tool event |
+| retriever | `kind="retrieval"`, action `retriever.<name>` — the kind names the operation; the target carries the retriever class, which identifies the backend (vector store, web search, file search) |
+| agent action | a step on the enclosing run's trace |
+
+Parentage follows LangChain's `run_id`/`parent_run_id`, so a model call
+inside a chain gets the right `parent_trace_id` with no shared call stack.
+Every trace in one top-level run shares a `correlation_id` (fresh per run,
+or fix one with `TraceActCallbackHandler(correlation_id=...)`), so
+`TraceLog.filter(correlation_id=...)` pulls a whole run together.
+
+**Prompt and response text is not recorded by default.** Model I/O is the
+most sensitive payload an agent app handles. `capture_content=True` opts in,
+and captured text still flows through `trace.input()`, so redaction applies
+— pair it with `TraceConfig(redaction_presets=["ai_prompts"])` to capture
+structure while stripping prompt-shaped fields. Handler callbacks never
+raise into the host application; a callback that cannot record records
+nothing.
+
+### Without a framework
+
+The same shape by hand, using explicit parenting (see
+[Manual API](#manual-api)) and the tool helper:
+
+```python
+root = ActionTrace.start(action="agent.run", actor="agent")
+model = ActionTrace.start(action="model.claude-sonnet-5", kind="model", parent=root)
+model.model(operation="completion", target="claude-sonnet-5", tokens_in=830, tokens_out=112)
+model.__exit__(None, None, None)
+
+tool = ActionTrace.start(action="tool.web_search", kind="tool", parent=root)
+tool.tool(operation="call", target="web_search", result={"results": 3})
+tool.__exit__(None, None, None)
+
+root.__exit__(None, None, None)
+```
+
+---
+
+## In-flight streaming
+
+By default, a trace becomes visible when it *finishes*: one complete JSONL
+line, written once. That contract is simple and right for millisecond
+actions — and wrong in two ways for long-running work. A 30-second agent run
+shows nothing until it completes, and a process that dies mid-trace loses
+that trace entirely: the record that would explain the crash is the one that
+never got written.
+
+In-flight streaming, opt-in, fixes both:
+
+```python
+configure(config=TraceConfig(stream_progress=True))
+```
+
+| Setting | Behaviour |
+|---|---|
+| unset *(default)* | No streaming; write-once-at-completion |
+| `stream_progress=True` | Slim stubs, 1s throttle |
+| `stream_progress=2.5` | Slim stubs, custom throttle in seconds |
+| `stream_progress="full"` | Full-record snapshots (for a function that opts in via a decorator-level config) |
+
+While a streaming trace is open, it appends `"running"` stub lines to the
+sinks: identity plus a progress cursor (step/event/error counts, the last
+step's label), roughly 300 bytes each, marked `in_flight: true` with a
+monotonic `progress_seq`. The final record supersedes them all.
+
+**The write rules:**
+
+- **Grace** — no stubs until the trace has been open longer than its
+  throttle interval. A trace that finishes inside the interval (most
+  traffic) writes nothing extra, ever.
+- **Throttle** — at most one stub per interval, however busy the trace is.
+- **Heartbeat** — a quiet open trace still reports at 5× the interval, so a
+  hang reads as "running, nothing new since `snapshot_at`" rather than a
+  silence identical to death.
+- **Errors** — an error-bearing snapshot skips the throttle and carries the
+  full record, so if the process dies right after, the whole story up to
+  the failure is already on disk.
+
+**Readers collapse stubs automatically.** The viewer shows one row per
+trace: it appears marked `running`, updates in place as stubs arrive, and
+flips to its final state on completion. `TraceLog` returns one record per
+trace — the final one, or the latest stub for a trace that never finished.
+That orphaned stub is the crash evidence: a `SIGKILL` at step 4 of 7 leaves
+a record saying `running`, 4 steps, last step's label — where on 0.11.0 and
+earlier the trace simply did not exist.
+
+**Costs, so the trade is explicit:** stub lines accumulate in the file (a
+30s run at the default throttle adds a few KB; `JsonlSink(max_bytes=...)`
+rotation cleans up), and snapshots write straight to the sinks even in
+buffered mode — deferring the "live" view to an exit flush would defeat it.
+Readers older than 0.12.0 don't know the `in_flight` flag and would show
+stubs as extra rows, so upgrade viewers before enabling streaming.
 
 ---
 

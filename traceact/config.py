@@ -24,6 +24,12 @@ from typing import Any, List, Optional
 
 from traceact.redaction import REDACTION_PRESETS
 
+# The transforms a list-form capture spec may name after a field
+# ("card_number:last4"). Applied in decorators._apply_transform; validated
+# here at TraceConfig construction so both entry routes (the capture_inputs=
+# shorthand and an explicit TraceConfig) fail loudly on a typo.
+CAPTURE_TRANSFORMS = frozenset({"hash", "last4", "length"})
+
 
 class TraceConfig:
     """
@@ -118,6 +124,8 @@ class TraceConfig:
         capture_inputs: Any = None,
         capture_outputs: Optional[bool] = None,
         redaction_presets: Optional[List[str]] = None,
+        redact_values: Optional[bool] = None,
+        stream_progress: Any = None,
     ) -> None:
         if redaction_presets is not None:
             unknown = set(redaction_presets) - set(REDACTION_PRESETS)
@@ -127,6 +135,42 @@ class TraceConfig:
                     f"Available: {sorted(REDACTION_PRESETS)}"
                 )
 
+        # In-flight streaming accepts exactly four spellings; anything else
+        # is a config typo and fails here, loudly, not at trace time.
+        #   None/False — off (default)
+        #   True       — slim stubs, 1s throttle
+        #   <seconds>  — slim stubs, custom throttle (positive number)
+        #   "full"     — full-record snapshots, 1s throttle
+        if stream_progress is not None and stream_progress is not False:
+            is_number = (isinstance(stream_progress, (int, float))
+                         and not isinstance(stream_progress, bool)
+                         and stream_progress > 0)
+            if not (stream_progress is True
+                    or stream_progress == "full"
+                    or is_number):
+                raise ValueError(
+                    f"stream_progress must be True, a positive number of "
+                    f"seconds, or \"full\" — got {stream_progress!r}"
+                )
+
+        # A list-form capture spec may carry per-field transforms
+        # ("card_number:last4"). Validate the transform names here, at
+        # construction, so a typo fails loudly at import time rather than
+        # silently skipping capture on every call.
+        if isinstance(capture_inputs, list):
+            for entry in capture_inputs:
+                if not isinstance(entry, str):
+                    raise ValueError(
+                        f"capture_inputs entries must be strings, "
+                        f"got {type(entry).__name__}: {entry!r}"
+                    )
+                _field, _, transform = entry.partition(":")
+                if transform and transform not in CAPTURE_TRANSFORMS:
+                    raise ValueError(
+                        f"Unknown capture transform {transform!r} in "
+                        f"{entry!r}. Available: {sorted(CAPTURE_TRANSFORMS)}"
+                    )
+
         self.enabled = enabled
         self.sink_mode = sink_mode
         self.strict = strict
@@ -134,6 +178,19 @@ class TraceConfig:
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
         self.redaction_presets = redaction_presets
+        # Scan captured string VALUES for known credential formats (AWS keys,
+        # sk- tokens, JWTs, PEM blocks, ...) and replace matches with
+        # "[redacted:<pattern>]". Defaults to ON: field-name redaction is
+        # blind to a secret under an unexpected key, and the registry admits
+        # only formats distinctive enough to make false positives unlikely.
+        # See traceact.redaction.VALUE_PATTERNS and USAGE.md for the list.
+        self.redact_values = redact_values
+        # In-flight streaming: while a trace is open, append "running" stub
+        # lines to the sinks so long-running work is visible before it
+        # finishes — and so a crash leaves evidence instead of losing the
+        # trace entirely. Off by default; see the validation block above for
+        # the accepted spellings, and USAGE.md for the full design.
+        self.stream_progress = stream_progress
 
 
 # ---------------------------------------------------------------------------
