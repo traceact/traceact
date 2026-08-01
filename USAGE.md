@@ -56,7 +56,7 @@ tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 10. [Errors](#errors)
 11. [Parent and child traces](#parent-and-child-traces)
 12. [Framework recipes](#framework-recipes)
-13. [Background jobs and correlation IDs](#background-jobs-and-correlation-ids)
+13. [Queue and background job tracing](#queue-and-background-job-tracing)
 14. [Input capture](#input-capture)
 15. [Sinks](#sinks)
 16. [TraceLog](#tracelog)
@@ -252,6 +252,8 @@ trace.event(
     status="completed",         # "completed" | "failed" | "pending" | "running" | "cancelled"
     duration_ms=12.4,           # how long it took
     result={"rows": 1},         # what the event produced
+    input={"limit": 10},        # what went into it — recorded only when
+                                # capture_event_inputs is enabled (see below)
     error=None,                 # exception or error dict if it failed
     parent_event_id=None,       # for nested events
     # any extra kwargs are stored on the event:
@@ -282,6 +284,22 @@ trace.event(
 
 Events automatically derive touches. A `kind="db"` event with `target="notes"` creates a `db_table:notes` touch on the trace.
 
+### Event-level inputs (`capture_event_inputs`)
+
+By default, events record what they produced (`result`), not what went into them — a trace's own `inputs` plus the event's `operation` and `target` usually tell that story, and per-event inputs would bloat every record. For high-verbosity tracing where the per-event input IS the story (the exact parameters behind each DB call, the payload of each HTTP post), opt in:
+
+```python
+configure(config=TraceConfig(capture_event_inputs=True))
+
+trace.db("select", "users", input={"user_id": 42, "limit": 10})
+trace.http("post", "stripe", input={"amount": 1200, "currency": "gbp"})
+trace.tool("call", "web_search", input={"query": "traceact"})
+```
+
+The value lands in the event's `input` field. Without the opt-in, `input=` is silently dropped — call sites can pass it unconditionally and let config decide, the same contract as `trace.output()` under `capture_outputs=False`.
+
+Recorded inputs go through the full safety pipeline: field-name redaction for dicts (`{"password": ...}` → `"[redacted]"`), value-pattern scanning, and the `max_payload_bytes` cap. An explicit `capture_event_inputs=False` at the `configure()` level is a global kill switch that a decorator or trace-level config cannot re-enable — the same rule as `capture_inputs`.
+
 ---
 
 ## Helper methods
@@ -309,6 +327,12 @@ trace.model(operation="embedding", target="text-embedding-3-small")
 # the model call is the inference; the tool call is the capability it picked.
 trace.tool(operation="call", target="web_search", duration_ms=840)
 trace.tool(operation="execute", target="python_repl", status="failed", error={...})
+
+# Queue — a message crossing a queue boundary. The producer records the
+# publish, the worker records the consume; see "Queue and background job
+# tracing" for linking the two traces across the boundary.
+trace.queue(operation="publish", target="exports", message_id="m_1")
+trace.queue(operation="consume", target="exports", message_id="m_1", attempt=1)
 ```
 
 All helpers use `target` as the resource field name. Aliases like `table`, `url`, or `path` aren't accepted.
@@ -522,64 +546,79 @@ If you want every request to carry a correlation ID automatically (so all traces
 
 ---
 
-## Background jobs and correlation IDs
+## Queue and background job tracing
 
-`correlation_id` links traces that belong to the same logical unit of work — a request, a job, a batch run — even when they happen across different function calls or processes. TraceAct doesn't generate or propagate it automatically across a queue boundary; the queue's message *is* the propagation mechanism, so you pass the ID through it like any other job argument.
+A queue boundary breaks ambient context: the worker that picks up a job runs in a different process with a fresh, empty `ContextVar` context, so the automatic parent/child linking that works within one process can't reach across. The queue's message *is* the propagation mechanism — TraceAct gives the trace context a first-class way to travel as job data.
 
-**Enqueuing** — generate (or reuse) a correlation ID before the job goes on the queue:
+**Enqueue side — `inject_context()`.** Stamps the active trace's context into a payload dict, the queue-boundary counterpart of `inject_headers()`:
 
 ```python
-import uuid
-from myqueue import enqueue
+from traceact import inject_context
 
-def start_export(user_id: int):
-    correlation_id = f"corr_{uuid.uuid4().hex[:12]}"
-    enqueue("export_report", user_id=user_id, correlation_id=correlation_id)
-    return correlation_id  # e.g. return to the client so it can poll status
+with ActionTrace.start(action="export.start", kind="app") as trace:
+    trace.queue(operation="publish", target="exports")
+    job = inject_context({"user_id": 42})
+    # job == {"user_id": 42, "traceact-trace-id": "trc_...",
+    #         "traceact-correlation-id": "corr_..."}   (correlation if set)
 ```
+
+The stamped keys are the same names the HTTP headers use, and the values are plain strings — the dict survives any queue serialiser's JSON round-trip. When there's no active trace, the current incoming propagation context is forwarded instead (an HTTP handler that only enqueues still passes the chain along), and when there's no context at all the payload comes back without extra keys, so it's safe to call unconditionally.
+
+**Worker side — the reserved `traceact_context` kwarg.** Pass the context dict to any `@traced_action`-decorated function under the keyword `traceact_context`. The decorator consumes it — the wrapped function never sees the kwarg, and input capture never records it — and links the job's trace to the enqueuing trace:
+
+```python
+@traced_action(action="export.run", kind="job", actor="worker")
+def export_report(user_id: int):
+    ...
+
+export_report(42, traceact_context=job)   # the whole payload works — only
+                                          # the traceact-* keys are read
+```
+
+The worker's trace gets `upstream_trace_id` (the enqueuing trace's ID — causal lineage across the boundary) and `correlation_id` (the shared workflow ID). An explicit `correlation_id=` on the decorator still wins. Cross-process linkage is upstream, not parent: `parent_trace_id` stays `None` because the two traces never shared a process.
 
 **Celery:**
 
 ```python
 from celery import shared_task
-from traceact import traced_action
+from traceact import inject_context, traced_action
 
+# Producer
+export_report.delay(user_id=42, traceact_context=inject_context())
+
+# Worker
 @shared_task(name="export_report")
 @traced_action(action="report.export", kind="job", actor="worker")
-def export_report(user_id: int, correlation_id: str = None):
-    # correlation_id is picked up automatically by @traced_action's
-    # correlation_id kwarg only if passed through explicitly:
-    ...
-```
-
-`@traced_action`'s `correlation_id` parameter isn't populated from task kwargs automatically — pass it explicitly so the decorator sees it:
-
-```python
-@shared_task(name="export_report")
-def export_report(user_id: int, correlation_id: str = None):
-    _export_report(user_id, correlation_id=correlation_id)
-
-@traced_action(action="report.export", kind="job", actor="worker")
-def _export_report(user_id: int, correlation_id: str = None):
+def export_report(user_id: int):
     ...
 ```
 
 **RQ:**
 
 ```python
-from rq import Queue
-from traceact import traced_action
-
-@traced_action(action="report.export", kind="job", actor="worker")
-def export_report(user_id: int, correlation_id: str = None):
-    ...
-
-queue.enqueue(export_report, user_id=42, correlation_id="corr_abc123")
+queue.enqueue(export_report, user_id=42, traceact_context=inject_context())
 ```
 
-**Why this can't be automatic:** `contextvars.ContextVar` (which powers automatic parent/child linking within one process) does not cross a queue boundary — the worker that picks up the job runs in a different process with a fresh, empty context. The correlation ID has to travel as ordinary job data, the same way you'd pass any other argument the job needs.
+**Manual control** — when the job function isn't decorated, or you want the context around a wider block, `propagate()` accepts the same dict it accepts for HTTP headers:
 
-Traces from the enqueue side and the worker side won't share a `parent_trace_id` (they're different processes, so there's no shared ContextVar to link them), but they will share `correlation_id`. The viewer's search box doesn't currently filter by `correlation_id` (it matches on action, kind, status, and touched targets); to pull together one job's traces today, use "Copy JSON" on a trace to get its `correlation_id`, then `grep` or `jq` the JSONL file for it: `jq 'select(.correlation_id == "corr_abc123")' data/traces/traces.jsonl`.
+```python
+from traceact import propagate
+
+def worker_loop(job):
+    with propagate(job["payload"]):
+        with ActionTrace.start(action="export.run", kind="job") as trace:
+            trace.queue(operation="consume", target="exports")
+            ...
+```
+
+**Recording the boundary itself — `trace.queue()`.** The helper for `kind="queue"` events: the producer records the publish, the worker records the consume. Standard operations: `publish`, `consume`, `ack`, `retry`, `reject`.
+
+```python
+trace.queue(operation="publish", target="exports", message_id="m_1")
+trace.queue(operation="consume", target="exports", message_id="m_1", attempt=1)
+```
+
+The viewer's search box doesn't currently filter by `correlation_id` (it matches on action, kind, status, and touched targets); to pull together one job's traces, use "Copy JSON" on a trace to get its `correlation_id`, then `jq` the JSONL file for it: `jq 'select(.correlation_id == "corr_abc123")' data/traces/traces.jsonl`.
 
 ---
 
@@ -1222,6 +1261,8 @@ TraceConfig(
     redact_by_default=True,    # True: apply redaction to captured inputs/outputs
     capture_inputs=False,      # global default; False = global kill switch
     capture_outputs=True,      # whether trace.output() records anything
+    capture_event_inputs=False,  # whether trace.event(input=...) records anything
+                                 # (explicit False here = global kill switch)
     redact_values=True,        # scan captured string content for credential formats
     stream_progress=None,      # in-flight streaming: True | <seconds> | "full"
 )
@@ -1320,6 +1361,7 @@ The full JSON object written to the JSONL sink:
       "started_at": "2026-07-20T08:30:00.008Z",
       "ended_at": "2026-07-20T08:30:00.013Z",
       "duration_ms": 5.1,
+      "input": null,
       "result": {"rows": 1},
       "error": null,
       "depth": 1
@@ -1427,7 +1469,7 @@ traceact doctor [SOURCE]
 
 Runs a handful of local checks and prints a pass/fail report — useful when tracing "isn't working" and you want to rule out setup problems before debugging your own code:
 
-- Python version meets the 3.9 minimum
+- Python version meets the 3.10 minimum
 - the `~/.traceact` state directory exists and is writable (single-instance coordination and drag-drop imports depend on this)
 - whether a viewer is currently running (informational only — `doctor` doesn't require one)
 - if `SOURCE` is given: that the path exists and its lines parse as valid trace records
@@ -1436,7 +1478,7 @@ Runs a handful of local checks and prints a pass/fail report — useful when tra
 $ traceact doctor data/traces/traces.jsonl
 traceact doctor
 
-  ✓  Python 3.11 (OK, 3.9+ required)
+  ✓  Python 3.11 (OK, 3.10+ required)
   ·  traceact 0.3.0
   ✓  State directory (/Users/you/.traceact) is writable
   ·  No viewer currently running (not required).
@@ -1478,7 +1520,7 @@ The "Add source" modal supports three ways to load a source:
 `launch.command` is a double-clickable shell script in the repo root. Opening it from Finder:
 
 1. Probes port 8765 — if a viewer is already running, opens it immediately and exits.
-2. Finds Python 3.9+ on the machine (checks pyenv shims, Homebrew, system Python).
+2. Finds Python 3.10+ on the machine (checks pyenv shims, Homebrew, system Python).
 3. Creates (or reuses) a `.venv/` virtual environment in the same directory.
 4. Installs or upgrades `traceact` inside that venv.
 5. Runs `traceact view`, waits for the server to be ready, then opens the browser.

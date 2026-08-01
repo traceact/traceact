@@ -128,6 +128,7 @@ class _EffectiveConfig:
     __slots__ = (
         "enabled", "sink_mode", "strict",
         "redact_by_default", "capture_inputs", "capture_outputs",
+        "capture_event_inputs",
         "redaction_patterns", "redact_values", "stream_progress",
     )
 
@@ -139,6 +140,7 @@ class _EffectiveConfig:
         redact_by_default: bool,
         capture_inputs: Any,
         capture_outputs: bool,
+        capture_event_inputs: bool,
         redaction_patterns: "frozenset",
         redact_values: bool,
         stream_progress: Any = None,
@@ -149,6 +151,9 @@ class _EffectiveConfig:
         self.redact_by_default = redact_by_default
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
+        # Whether trace.event(input=...) is recorded on the event. Off by
+        # default to keep event records lean; opt-in via TraceConfig.
+        self.capture_event_inputs = capture_event_inputs
         # Baseline SENSITIVE_PATTERNS plus any opt-in REDACTION_PRESETS named
         # in TraceConfig(redaction_presets=[...]). Only consulted when
         # redact_by_default is True.
@@ -224,6 +229,7 @@ def _resolve_config(
     redact_by_default = True
     capture_inputs: Any = False   # safe default: no automatic capture
     capture_outputs = True
+    capture_event_inputs = False  # lean default: events record results, not inputs
     redact_values = True          # value-pattern scanning on by default
     stream_progress: Any = None   # in-flight streaming off by default
 
@@ -238,6 +244,7 @@ def _resolve_config(
         if pkg.redact_by_default is not None: redact_by_default = pkg.redact_by_default
         if pkg.capture_inputs is not None:   capture_inputs = pkg.capture_inputs
         if pkg.capture_outputs is not None:  capture_outputs = pkg.capture_outputs
+        if pkg.capture_event_inputs is not None: capture_event_inputs = pkg.capture_event_inputs
         if pkg.redaction_presets is not None: redaction_presets = pkg.redaction_presets
         if pkg.redact_values is not None:    redact_values = pkg.redact_values
         if pkg.stream_progress is not None:  stream_progress = pkg.stream_progress
@@ -250,6 +257,7 @@ def _resolve_config(
         if local_override.redact_by_default is not None: redact_by_default = local_override.redact_by_default
         if local_override.capture_inputs is not None:   capture_inputs = local_override.capture_inputs
         if local_override.capture_outputs is not None:  capture_outputs = local_override.capture_outputs
+        if local_override.capture_event_inputs is not None: capture_event_inputs = local_override.capture_event_inputs
         # Replaces (not merges with) the package-level list, same as every
         # other field here — a decorator that cares enough to override
         # presets is expected to name the full set it wants.
@@ -262,6 +270,13 @@ def _resolve_config(
     # We re-apply the package setting last to enforce this.
     if pkg is not None and pkg.capture_inputs is False:
         capture_inputs = False
+
+    # Same rule for event-level inputs: an explicit package-level False is a
+    # kill switch no decorator can override. (The *default* is also False, but
+    # a default can be opted out of per decorator; an explicit configure()-
+    # level False cannot.)
+    if pkg is not None and pkg.capture_event_inputs is False:
+        capture_event_inputs = False
 
     # Merge the always-on baseline with whichever presets are active. Preset
     # names are validated at TraceConfig construction time, so no further
@@ -277,6 +292,7 @@ def _resolve_config(
         redact_by_default=redact_by_default,
         capture_inputs=capture_inputs,
         capture_outputs=capture_outputs,
+        capture_event_inputs=capture_event_inputs,
         redaction_patterns=redaction_patterns,
         redact_values=redact_values,
         stream_progress=stream_progress,
@@ -608,6 +624,8 @@ class _NoOpTrace:
     def http(self, *args: Any, **kwargs: Any) -> None: pass
     def file(self, *args: Any, **kwargs: Any) -> None: pass
     def model(self, *args: Any, **kwargs: Any) -> None: pass
+    def tool(self, *args: Any, **kwargs: Any) -> None: pass
+    def queue(self, *args: Any, **kwargs: Any) -> None: pass
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +945,7 @@ class ActionTrace(TraceHelpersMixin):
         result: Optional[Any] = None,
         error: Optional[Any] = None,
         parent_event_id: Optional[str] = None,
+        input: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -950,6 +969,12 @@ class ActionTrace(TraceHelpersMixin):
             result:         What the event produced (rows returned, response status, etc.).
             error:          An error dict or exception string if the event failed.
             parent_event_id: ID of a parent event if this event was caused by another.
+            input:          What went INTO this specific operation (the query
+                            parameters behind a DB call, the payload of an HTTP
+                            post). Recorded only when capture_event_inputs is
+                            enabled in config — dropped silently otherwise, so
+                            call sites can pass it unconditionally and let
+                            config decide. Redaction and size limits apply.
             **kwargs:       Any additional fields to store with the event (database,
                             rows, tokens_in, tokens_out, etc.).
 
@@ -978,6 +1003,30 @@ class ActionTrace(TraceHelpersMixin):
                 scan_values=self._effective_config.redact_values,
             )
 
+        # Apply payload safety to the input field — recorded only when the
+        # resolved config opts in (capture_event_inputs, off by default). Dicts
+        # go through _sanitise_dict so field-name redaction applies per key,
+        # matching trace.input(); anything else through _safe_value.
+        safe_input = None
+        if input is not None and self._effective_config.capture_event_inputs:
+            if isinstance(input, dict):
+                safe_input = _sanitise_dict(
+                    input,
+                    self._effective_budget.max_payload_bytes,
+                    self._effective_config.redact_by_default,
+                    self._effective_config.redaction_patterns,
+                    scan_values=self._effective_config.redact_values,
+                )
+            else:
+                safe_input = _safe_value(
+                    "input",
+                    input,
+                    self._effective_budget.max_payload_bytes,
+                    self._effective_config.redact_by_default,
+                    self._effective_config.redaction_patterns,
+                    scan_values=self._effective_config.redact_values,
+                )
+
         # Build the event record. Extra kwargs (rows, database, tokens_in, etc.)
         # are stored directly on the event dict so callers can attach any fields
         # they need without TraceAct needing to enumerate them all.
@@ -992,6 +1041,7 @@ class ActionTrace(TraceHelpersMixin):
             "started_at": _now_iso(),
             "ended_at": _now_iso(),
             "duration_ms": duration_ms,
+            "input": safe_input,
             "result": safe_result,
             "error": error,
             "depth": self._depth,

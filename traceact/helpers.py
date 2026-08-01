@@ -102,6 +102,30 @@ class TraceHelpersMixin:
         """
         self.event(kind="model", operation=operation, target=target, **kwargs)
 
+    def queue(self, operation: str, target: str, **kwargs: Any) -> None:
+        """
+        Record a queue event — a message crossing a queue boundary.
+
+        Equivalent to: trace.event(kind="queue", operation=operation, target=target, ...)
+
+        Use it on both sides of the boundary: the producer records the
+        publish, the worker records the consume (and its own trace links back
+        to the producer's via inject_context() / traceact_context — see
+        USAGE.md, "Queue and background job tracing").
+
+        Args:
+            operation: What happened at the boundary. Standard values:
+                       publish, consume, ack, retry, reject.
+            target:    The queue or topic name. Example: "emails",
+                       "exports.high-priority".
+            **kwargs:  Additional fields such as message_id="...",
+                       attempt=2, delay_ms=350, result={...}.
+
+        Example:
+            trace.queue(operation="publish", target="exports", message_id="m_1")
+        """
+        self.event(kind="queue", operation=operation, target=target, **kwargs)
+
     def tool(self, operation: str, target: str, **kwargs: Any) -> None:
         """
         Record a tool call event — an agent (or any orchestrator) invoking a

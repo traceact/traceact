@@ -90,6 +90,20 @@ class TraceConfig:
             When True (default), calls to trace.output() are recorded on the
             trace. When False, trace.output() is a no-op.
 
+        capture_event_inputs:
+            When True, the input= argument to trace.event() (and the helper
+            methods that wrap it: trace.db(), trace.http(), trace.model(),
+            trace.tool(), ...) is recorded on the event, with redaction and
+            size limits applied. When False (the package default), input= is
+            silently dropped — events record what they produced (result), not
+            what went into them, keeping default records lean. Opt in for
+            high-verbosity tracing where per-event inputs are the story
+            (e.g. the exact query parameters behind each DB call).
+
+            Like capture_inputs, a package-level False set via configure() is
+            a global kill switch that a decorator or trace-level config
+            cannot re-enable.
+
         redaction_presets:
             Named groups of extra field-name patterns to redact, layered on
             top of the always-on baseline (password, token, secret, api_key,
@@ -123,6 +137,7 @@ class TraceConfig:
         redact_by_default: Optional[bool] = None,
         capture_inputs: Any = None,
         capture_outputs: Optional[bool] = None,
+        capture_event_inputs: Optional[bool] = None,
         redaction_presets: Optional[List[str]] = None,
         redact_values: Optional[bool] = None,
         stream_progress: Any = None,
@@ -177,6 +192,9 @@ class TraceConfig:
         self.redact_by_default = redact_by_default
         self.capture_inputs = capture_inputs
         self.capture_outputs = capture_outputs
+        # Whether trace.event(input=...) is recorded. Off by default so event
+        # records stay lean; see the class docstring for the semantics.
+        self.capture_event_inputs = capture_event_inputs
         self.redaction_presets = redaction_presets
         # Scan captured string VALUES for known credential formats (AWS keys,
         # sk- tokens, JWTs, PEM blocks, ...) and replace matches with

@@ -463,14 +463,31 @@ function sectionEvents(t) {
     const ok = e.status !== "failed";
     const arrow = `${esc(e.operation || "")} → ${esc(e.target || "")}`;
     const sub = eventSubline(e);
+    const inp = eventInputLine(e);
     return `<div class="insp-event">
       <div class="insp-event-head">${kindBadge(e.kind)}
         <span>${ok ? "✓" : "✕"} ${arrow}</span></div>
+      ${inp ? `<div class="insp-event-sub">${esc(inp)}</div>` : ""}
       ${sub ? `<div class="insp-event-sub">${esc(sub)}</div>` : ""}
     </div>`;
   }).join("");
   return `<div class="insp-section-label">EVENTS (${events.length})</div>
     <div class="insp-list">${rows || `<span class="muted">none</span>`}</div>`;
+}
+
+function eventInputLine(e) {
+  // Event-level input (capture_event_inputs opt-in). Same one-line treatment
+  // as the result subline, prefixed so the two read as in/out.
+  const i = e.input;
+  if (i === null || i === undefined) return "";
+  if (typeof i === "object") {
+    const keys = Object.keys(i);
+    if (!keys.length) return "";
+    const key = keys[0];
+    const more = keys.length > 1 ? ` +${keys.length - 1}` : "";
+    return `in · ${key}: ${i[key]}${more}`;
+  }
+  return `in · ${i}`;
 }
 
 function eventSubline(e) {

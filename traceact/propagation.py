@@ -200,6 +200,53 @@ def inject_headers(headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     return result
 
 
+def inject_context(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Return a payload dict with the TraceAct propagation context stamped in —
+    the queue-boundary counterpart of :func:`inject_headers`.
+
+    A queue's message is its propagation mechanism: the worker that picks up
+    a job runs in a different process with a fresh, empty context, so trace
+    context has to travel as ordinary job data. Call this on the enqueue side
+    and ship the result with the job:
+
+        job = inject_context({"user_id": 42})
+        queue.enqueue("export_report", **job)          # RQ-style
+        task.delay(user_id=42, traceact_context=inject_context())  # Celery-style
+
+    The stamped keys are the same names the HTTP headers use
+    (``traceact-trace-id`` / ``traceact-correlation-id``), and the values are
+    plain strings — the dict is JSON-safe and round-trips through any queue
+    serialiser. On the worker side, either:
+
+      * pass the dict as the reserved ``traceact_context`` keyword to a
+        function decorated with ``@traced_action`` — the decorator consumes
+        it (the function never sees the kwarg) and links the job's trace to
+        the enqueuing trace via ``upstream_trace_id`` / ``correlation_id``; or
+      * apply it manually: ``with propagate(job_context): ...`` — the same
+        context manager that handles incoming HTTP headers accepts this dict
+        unchanged.
+
+    Like :func:`inject_headers`, when there is no active trace the current
+    incoming propagation context is forwarded instead, so an untraced hop
+    (an HTTP handler that only enqueues) still passes the chain along.
+
+    Args:
+        payload: An existing job payload dict to extend. A copy is made — the
+                 original is never modified. Defaults to an empty dict.
+
+    Returns:
+        A new dict with all original payload keys plus whichever propagation
+        keys apply. When no trace context exists at all, the payload is
+        returned (as a copy) without extra keys — safe to call
+        unconditionally.
+    """
+    # The header carrier and the job carrier are the same wire format: a
+    # lowercase-keyed str->str mapping. Delegating keeps one source of truth
+    # for what travels and how fallbacks work.
+    return inject_headers(payload)
+
+
 class propagate:
     """
     Context manager that applies incoming trace context to new traces.

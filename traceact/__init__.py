@@ -64,13 +64,20 @@
 #                   link its traces back to the caller. Returns a new dict;
 #                   the original is not modified.
 #
+#   inject_context — the queue-boundary counterpart of inject_headers. Stamps
+#                   the same context into a job payload dict, which travels
+#                   through the queue as ordinary data (a worker process has
+#                   no shared ContextVar to inherit). On the worker side pass
+#                   it as the reserved traceact_context kwarg to a
+#                   @traced_action function, or to propagate().
+#
 #   TraceActMiddleware     — WSGI middleware (Flask, Django). Wraps the app and
 #                   propagates automatically on every request.
 #
 #   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
 #                   above for async frameworks.
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
@@ -82,6 +89,7 @@ from traceact.log import TraceLog
 from traceact.propagation import (
     propagate,
     inject_headers,
+    inject_context,
     extract_trace_id,
     extract_correlation_id,
 )
@@ -105,6 +113,7 @@ __all__ = [
     "TraceLog",
     "propagate",
     "inject_headers",
+    "inject_context",
     "extract_trace_id",
     "extract_correlation_id",
     "TraceActMiddleware",

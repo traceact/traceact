@@ -6,7 +6,7 @@
 # text, the API returns it as JSON for the Settings page to render.
 #
 # Checks performed:
-#   - Python version meets the 3.9 minimum
+#   - Python version meets the 3.10 minimum
 #   - the ~/.traceact state directory exists and is writable (single-instance
 #     coordination and drag-drop imports depend on this)
 #   - whether a viewer is currently running (informational only — never a
@@ -45,18 +45,18 @@ def run_checks(source: Optional[str] = None) -> Dict[str, Any]:
     """
     checks: List[Dict[str, str]] = []
 
-    py_ok = sys.version_info >= (3, 9)
+    py_ok = sys.version_info >= (3, 10)
     py_check = {
         "label": "python_version",
         "status": "pass" if py_ok else "fail",
         "message": (
             f"Python {sys.version_info.major}.{sys.version_info.minor} "
-            f"({'meets the 3.9+ requirement' if py_ok else 'is below the 3.9 minimum'})"
+            f"({'meets the 3.10+ requirement' if py_ok else 'is below the 3.10 minimum'})"
         ),
     }
     if not py_ok:
         py_check["hint"] = (
-            "TraceAct needs Python 3.9 or later. Install a newer Python and "
+            "TraceAct needs Python 3.10 or later. Install a newer Python and "
             "reinstall traceact into that environment."
         )
     checks.append(py_check)

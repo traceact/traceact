@@ -754,7 +754,7 @@ def _iso_to_nanos(ts: Optional[str]) -> int:
     a bad timestamp in one trace record doesn't drop the whole export.
 
     Python's datetime.fromisoformat handles "Z" only from 3.11+; we normalise
-    the "Z" suffix to "+00:00" first so this works on Python 3.9/3.10 too.
+    the "Z" suffix to "+00:00" first so this works on Python 3.10 too.
     """
     if not ts:
         return 0

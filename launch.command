@@ -4,7 +4,7 @@
 # Double-click this file in Finder to open TraceAct in your browser.
 # It handles the full startup sequence:
 #   1. Checks whether a viewer is already running → opens it immediately.
-#   2. Locates Python 3.9+ (pyenv shim, system Python, Homebrew, etc.).
+#   2. Locates Python 3.10+ (pyenv shim, system Python, Homebrew, etc.).
 #   3. Creates (or reuses) a local virtual environment at .venv/.
 #   4. Installs or upgrades traceact inside that venv.
 #   5. Launches `traceact view` and opens your browser.
@@ -46,7 +46,7 @@ if curl -sf --max-time 0.5 "http://${VIEWER_HOST}:${VIEWER_PORT}/api/health" >/d
   exit 0
 fi
 
-# ── Step 2: locate Python 3.9+ ──────────────────────────────────────────────
+# ── Step 2: locate Python 3.10+ ──────────────────────────────────────────────
 find_python() {
   # Prefer pyenv shim, then common Homebrew / system locations.
   for candidate in \
@@ -58,7 +58,7 @@ find_python() {
       /usr/bin/python3 \
       python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
-      ver=$("$candidate" -c "import sys; print(sys.version_info >= (3,9))" 2>/dev/null || echo False)
+      ver=$("$candidate" -c "import sys; print(sys.version_info >= (3,10))" 2>/dev/null || echo False)
       if [ "$ver" = "True" ]; then
         echo "$candidate"
         return 0
@@ -68,7 +68,7 @@ find_python() {
   return 1
 }
 
-PYTHON=$(find_python) || die "Python 3.9 or later is required but was not found.
+PYTHON=$(find_python) || die "Python 3.10 or later is required but was not found.
 Install it from https://python.org or via Homebrew: brew install python"
 say "Using Python: $PYTHON ($($PYTHON --version 2>&1))"
 

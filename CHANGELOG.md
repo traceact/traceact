@@ -2,6 +2,29 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.13.0] — 2026-08-01
+
+### Added
+
+- **Event-level input recording, opt-in.** `trace.event(input=...)` — and the same argument on every helper (`trace.db()`, `trace.http()`, `trace.model()`, `trace.tool()`, ...) — records what went INTO a specific operation: the query parameters behind a DB call, the payload of an HTTP post. Gated by `TraceConfig(capture_event_inputs=True)` and off by default so event records stay lean; without the opt-in, `input=` is silently dropped, so call sites can pass it unconditionally and let config decide (the same contract as `trace.output()` under `capture_outputs=False`). Recorded inputs run the full safety pipeline: field-name redaction for dicts, value-pattern scanning, and the payload cap. A package-level explicit `False` is a kill switch no decorator can re-enable — the same rule as `capture_inputs`. The viewer's event inspector shows the captured input as an `in ·` line above the result. Every event now carries an `input` field (`null` when not captured), schema parity with `result`.
+
+- **Queue / background job tracing.** A queue boundary breaks ambient context — the worker runs in a different process with a fresh, empty `ContextVar` context — so trace context now travels as job data, first-class:
+  - `inject_context(payload)` stamps the active trace's ID and correlation ID into a job payload dict, the queue-boundary counterpart of `inject_headers()`. Same key names as the HTTP headers, plain-string values, JSON-serialiser-safe. No active trace forwards the incoming propagation context (an untraced enqueue hop still passes the chain along); no context at all returns the payload unchanged — safe to call unconditionally.
+  - The reserved `traceact_context` kwarg on any `@traced_action` function is the worker-side half: the decorator consumes it (the function never sees the kwarg, input capture never records it) and links the job's trace to the enqueuing trace — `upstream_trace_id` for causal lineage, `correlation_id` for the workflow group, explicit `correlation_id=` on the decorator still winning. Works sync and async; the whole job payload can be passed unfiltered, since only the `traceact-*` keys are read. Celery and RQ integration is one line on each side.
+  - `trace.queue(operation, target, ...)` — the helper for `kind="queue"` events. The producer records the publish, the worker records the consume; standard operations `publish`, `consume`, `ack`, `retry`, `reject`.
+
+### Changed
+
+- **Python 3.10 is now the minimum supported version.** `requires-python`, classifiers, docs, `traceact doctor`, and the macOS launcher all move from 3.9 to 3.10.
+
+### Fixed
+
+- **`trace.tool()` and `trace.queue()` no longer raise on a disabled trace.** `_NoOpTrace` — the stand-in returned when tracing is disabled, sampled out, or depth-capped — was missing the `tool` helper stub added in 0.12.0, so `trace.tool(...)` under `enabled=False` raised `AttributeError` instead of being silently absorbed. Both helpers now have no-op stubs.
+
+### Development
+
+- The dev extra now installs `httpx2` (Starlette's TestClient backend, replacing the deprecated httpx path) and `celery` — the queue-tracing tests drive real Celery dispatch through its in-memory broker and testing worker, so the job crosses a genuine boundary (kombu JSON-serialises the message; the worker thread starts with its own empty ContextVar context) without needing Redis or any external service.
+
 ## [0.12.0] — 2026-07-30
 
 ### Added

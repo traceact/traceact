@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceact"
-version = "0.12.0"
+version = "0.13.0"
 description = "X-ray vision for your code. Lightweight action-level tracing for Python."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -18,7 +18,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -51,11 +50,23 @@ dev = [
     "starlette>=0.36",
     "django>=4.2",
     "requests>=2.31",
+    # Starlette's TestClient switched to httpx2 and deprecates the httpx
+    # backend; without this the ASGI middleware tests still pass but emit a
+    # StarletteDeprecationWarning, and they break outright once Starlette drops
+    # the httpx path.
+    "httpx2>=2.9",
     # Real framework objects for the LangChain adapter tests
     # (traceact.integrations.langchain). Same rationale as above: the
     # adapter is exercised through langchain-core's own callback dispatch
     # (fake models, real tools, real runnables), not hand-built dicts.
     "langchain-core>=0.2",
+    # Real Celery dispatch for the queue-tracing tests (inject_context /
+    # traceact_context). Uses Celery's in-memory broker and its testing
+    # worker — no Redis or external service — but the job still crosses a
+    # genuine boundary: kombu JSON-serialises the message, and the worker
+    # thread has its own empty ContextVar context, so trace linkage in the
+    # test can only come from the payload.
+    "celery>=5.3",
 ]
 
 [project.urls]

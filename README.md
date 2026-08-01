@@ -142,6 +142,25 @@ Captured values are guarded twice: field-name redaction (`password`, `api_key`, 
 
 For long-running work, opt-in in-flight streaming (`TraceConfig(stream_progress=True)`) shows a `running` row that fills in as the trace progresses — and a process that crashes mid-trace leaves its last snapshot on disk as evidence instead of losing the trace entirely.
 
+## Background jobs and queues
+
+A queue boundary breaks ambient context: the worker runs in a different process with a fresh, empty context, so there's nothing for it to inherit. TraceAct sends the context across as job data instead — `inject_context()` on the producer, the reserved `traceact_context` kwarg on the worker:
+
+```python
+from traceact import inject_context, traced_action
+
+# Producer
+export_report.delay(user_id=42, traceact_context=inject_context())
+
+# Worker
+@shared_task(name="export_report")
+@traced_action(action="report.export", kind="job", actor="worker")
+def export_report(user_id: int):
+    ...
+```
+
+The decorator consumes the kwarg — your function never sees it — and links the job's trace to the enqueuing trace via `upstream_trace_id` and `correlation_id`. Works with Celery, RQ, or any queue that carries a dict. `trace.queue()` records the publish and consume events on either side.
+
 ## Wiring into a web app
 
 If your app has its own UI, add a backend route to launch or connect to the viewer, then call it from a button:
@@ -177,7 +196,7 @@ document.getElementById("btn-viewer").addEventListener("click", async () => {
 
 ## Requirements
 
-Python 3.9+. No runtime dependencies.
+Python 3.10+. No runtime dependencies.
 
 ## Development
 
@@ -188,7 +207,7 @@ pytest
 
 ## Full reference
 
-See [USAGE.md](USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`), input capture, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.
+See [USAGE.md](USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`, `trace.tool`, `trace.queue`), input capture, queue and background job tracing, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.
 
 ## License
 

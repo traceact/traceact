@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Union
 from traceact.budget import TraceBudget
 from traceact.config import TraceConfig
 from traceact.context import SKIP, pop_trace, push_trace
+from traceact.propagation import propagate
 from traceact.trace import (
     ActionTrace,
     _NoOpTrace,
@@ -262,6 +263,17 @@ def _sync_wrapper(
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Reserved kwarg: trace context shipped across a queue boundary via
+        # inject_context(). The decorator consumes it — the wrapped function
+        # never sees it — and applies it for the duration of the call, so the
+        # job's trace links back to the enqueuing trace (upstream_trace_id /
+        # correlation_id). propagate(None) is a no-op, so the common
+        # no-context path costs nothing but the pop.
+        job_context = kwargs.pop("traceact_context", None)
+        with propagate(job_context):
+            return _traced_call(func, args, kwargs)
+
+    def _traced_call(func: Any, args: tuple, kwargs: Dict[str, Any]) -> Any:
         # Build (or decide to skip) the trace. _create_trace handles all the
         # checks: enabled?, skip sentinel?, sampling?, depth limit?.
         trace_or_noop = _create_trace(
@@ -368,6 +380,13 @@ def _async_wrapper(
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Reserved kwarg — see _sync_wrapper. ContextVars set by propagate()
+        # are task-local, so wrapping the await is async-safe.
+        job_context = kwargs.pop("traceact_context", None)
+        with propagate(job_context):
+            return await _traced_call(func, args, kwargs)
+
+    async def _traced_call(func: Any, args: tuple, kwargs: Dict[str, Any]) -> Any:
         trace_or_noop = _create_trace(
             action=action,
             kind=kind,
