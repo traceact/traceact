@@ -21,9 +21,9 @@ jobs:
     permissions:
       # Required for Trusted Publishing (OIDC). Without this the publish fails.
       id-token: write
-      # Required for actions/checkout to read this (private) repository.
-      # Declaring any permissions block defaults all others to "none", so
-      # contents: read must be listed explicitly or checkout fails.
+      # Required for actions/checkout. Declaring any permissions block
+      # defaults all others to "none", so contents: read must be listed
+      # explicitly or checkout fails.
       contents: read
 
     steps:
