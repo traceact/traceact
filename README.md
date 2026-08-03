@@ -105,7 +105,7 @@ The source modal (click the source name in the header) lets you:
 traceact doctor [SOURCE]
 ```
 
-Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](USAGE.md#viewing-traces) for full output and exit-code details.
+Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md#viewing-traces) for full output and exit-code details.
 
 ## Concepts
 
@@ -207,7 +207,7 @@ pytest
 
 ## Full reference
 
-See [USAGE.md](USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`, `trace.tool`, `trace.queue`), input capture, queue and background job tracing, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.
+See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`, `trace.tool`, `trace.queue`), input capture, queue and background job tracing, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.
 
 ## License
 

@@ -2,6 +2,16 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.13.1] — 2026-08-02
+
+### Fixed
+
+- **README links to USAGE.md were relative, which PyPI renders as dead links.** PyPI resolves relative markdown links against `pypi.org/project/traceact/`, not GitHub, so `[USAGE.md](USAGE.md)` became `pypi.org/project/traceact/USAGE.md` — a 404. Both occurrences now point to the absolute GitHub URL.
+
+### Added
+
+- **`USAGE.md` now ships inside the installed package, not just the sdist and GitHub.** Previously only `pip download --no-binary` (the sdist) carried the full docs locally; a normal `pip install traceact` (the wheel) did not. `USAGE.md`'s source of truth stays at the repo root; the release build copies it into `traceact/` right before packaging, so it's importable-adjacent — `import traceact, os; os.path.dirname(traceact.__file__)` — for air-gapped machines, containers with no egress, or anyone who'd rather not leave the terminal. The root file is the only copy anyone should ever hand-edit; the packaged copy is generated and gitignored.
+
 ## [0.13.0] — 2026-08-01
 
 ### Added

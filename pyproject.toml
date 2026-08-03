@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceact"
-version = "0.13.0"
+version = "0.13.1"
 description = "X-ray vision for your code. Lightweight action-level tracing for Python."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -86,9 +86,16 @@ traceact = "traceact.viewer.cli:main"
 where = ["."]
 include = ["traceact*"]
 
-# Ship the viewer's static frontend (HTML/CSS/JS) inside the wheel.
+# Ship the viewer's static frontend (HTML/CSS/JS) inside the wheel, and a
+# copy of USAGE.md so the docs travel with `pip install traceact` itself —
+# not just with the sdist or the GitHub repo. USAGE.md's source of truth
+# stays at the repo root (where README/LICENSE/CHANGELOG live); the build
+# copies it to traceact/USAGE.md right before packaging (see publish.yml and
+# scripts/copy_usage_doc.py). The copy is gitignored — it's generated, never
+# hand-edited, and never committed.
 [tool.setuptools.package-data]
 "traceact.viewer" = ["static/*"]
+"traceact" = ["USAGE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

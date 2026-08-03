@@ -8,6 +8,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Generated copy of the root USAGE.md, made at build time (see publish.yml)
+# so the wheel ships the docs alongside the importable package. The root
+# USAGE.md is the only copy anyone should ever hand-edit.
+traceact/USAGE.md
 .eggs/
 
 # Virtual environments
