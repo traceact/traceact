@@ -51,6 +51,37 @@ def is_valid_trace(obj: Any) -> bool:
     return all(key in obj for key in _REQUIRED_KEYS)
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def is_sqlite_file(path: str) -> bool:
+    """
+    True if the file at `path` is a SQLite database, judged by its magic
+    header bytes rather than its extension — SqliteSink outputs get named
+    .db, .sqlite, .sqlite3, or anything else, and the header is the only
+    thing all of them share.
+    """
+    try:
+        with open(path, "rb") as f:
+            return f.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def _sqlite_connect(path: str):
+    """
+    Open a read-only connection with a short timeout. Read-only (URI mode)
+    so a viewer can never take a write lock on an application's live sink
+    database; 0.5s timeout so a locked database makes the read fail fast
+    instead of hanging a poll loop.
+    """
+    import sqlite3
+    from urllib.request import pathname2url
+
+    uri = f"file:{pathname2url(os.path.abspath(path))}?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=0.5)
+
+
 def _jsonl_files(path: str) -> List[str]:
     """
     Resolve a source path to the list of .jsonl files it refers to.
@@ -85,6 +116,15 @@ class SourceReader:
 
     def __init__(self, path: str) -> None:
         self.path = path
+        # A single-file source that sniffs as a SQLite database (SqliteSink
+        # output) reads through SQL instead of line parsing. The tail cursor
+        # is the table's id column — INTEGER PRIMARY KEY AUTOINCREMENT, so
+        # ids are monotonic and never reused, making "id > last seen" the
+        # exact analogue of a byte offset. INSERT OR REPLACE gives an
+        # updated trace a fresh id, so it re-surfaces through the tail and
+        # the client's replace-by-trace_id handling updates it in place.
+        self._sqlite = os.path.isfile(path) and is_sqlite_file(path)
+        self._last_id = 0
         # Per-file read position: {absolute_file_path: byte_offset_already_read}.
         # New files that appear later (e.g. a new shard) start at offset 0 and
         # so are read from their beginning on the next poll.
@@ -111,6 +151,9 @@ class SourceReader:
         Returns traces ordered newest-first (by started_at), matching the log's
         top-is-newest layout.
         """
+        if self._sqlite:
+            return self._sqlite_snapshot(limit)
+
         ring: Deque[Dict[str, Any]] = deque(maxlen=limit)
 
         for filepath in _jsonl_files(self.path):
@@ -159,6 +202,9 @@ class SourceReader:
         {"kind": "snapshot", "traces": [...]} (newest-first) — the caller
         should replace its trace list rather than prepend onto it.
         """
+        if self._sqlite:
+            return self._sqlite_poll(limit)
+
         fresh: List[Dict[str, Any]] = []
         replaced = False
 
@@ -203,6 +249,81 @@ class SourceReader:
         # Cross-poll supersession is the client's job — it replaces a row it
         # has already rendered when a newer record for that trace_id arrives.
         return {"kind": "append", "traces": _dedupe_in_flight(fresh)}
+
+    # -- SQLite sources ----------------------------------------------------
+
+    def _sqlite_snapshot(self, limit: int) -> List[Dict[str, Any]]:
+        """
+        Most recent `limit` traces from the sink's `traces` table, and reset
+        the tail cursor to the table's current maximum id.
+
+        A database that can't be read right now — locked past the timeout,
+        vanished, or lacking the table (not a SqliteSink output) — yields an
+        empty snapshot rather than an error, the same tolerance the JSONL
+        path shows an unreadable file. `doctor` is the surface that reports
+        such problems loudly.
+        """
+        try:
+            conn = _sqlite_connect(self.path)
+            try:
+                rows = conn.execute(
+                    "SELECT record FROM traces "
+                    "ORDER BY started_at DESC, id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                max_id = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM traces"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
+        self._last_id = max_id
+        traces = []
+        for (raw,) in rows:
+            obj = _parse_line(raw)
+            if obj is not None:
+                traces.append(obj)
+        return traces  # query already ordered newest-first
+
+    def _sqlite_poll(self, limit: int) -> Dict[str, Any]:
+        """
+        Rows inserted since the last snapshot()/poll(), in insertion order.
+
+        INSERT OR REPLACE means an updated trace (an in-flight stub
+        superseded, or a re-written trace_id) arrives here with a fresh id;
+        the client replaces the displayed row by trace_id. A maximum id
+        *below* the cursor means the database was recreated underneath us
+        (new file, reset AUTOINCREMENT sequence) — rebuild from a snapshot,
+        the same response the JSONL path gives a changed inode.
+        """
+        try:
+            conn = _sqlite_connect(self.path)
+            try:
+                max_id = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM traces"
+                ).fetchone()[0]
+                if max_id < self._last_id:
+                    return {"kind": "snapshot",
+                            "traces": self._sqlite_snapshot(limit)}
+                rows = conn.execute(
+                    "SELECT id, record FROM traces WHERE id > ? "
+                    "ORDER BY id ASC",
+                    (self._last_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return {"kind": "append", "traces": []}
+
+        fresh: List[Dict[str, Any]] = []
+        for row_id, raw in rows:
+            self._last_id = max(self._last_id, row_id)
+            obj = _parse_line(raw)
+            if obj is not None:
+                fresh.append(obj)
+        return {"kind": "append", "traces": fresh}
 
 
 # ---------------------------------------------------------------------------

@@ -383,9 +383,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "unknown source", "source": name})
             return
 
-        from traceact.viewer.reader import _jsonl_files
+        from traceact.viewer.reader import _jsonl_files, is_sqlite_file
         files = _jsonl_files(path)
         download_name = _export_filename(name)
+
+        # A SQLite source exports as NDJSON — the same download contract as
+        # every other source, generated from the record column in insertion
+        # order. Length is unknown until the cursor is exhausted, so this
+        # takes the streaming path, like a folder merge.
+        if len(files) == 1 and is_sqlite_file(files[0]):
+            self._export_sqlite(files[0], download_name)
+            return
 
         # A single file is streamed verbatim: no parsing, nothing reordered, so
         # the download is byte-identical to what the app wrote and the length
@@ -434,6 +442,31 @@ class _Handler(BaseHTTPRequestHandler):
             for line in _merged_lines(files):
                 self.wfile.write(line)
         except (OSError, BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _export_sqlite(self, db_path: str, download_name: str) -> None:
+        # NDJSON generated from the record column, ordered by insertion. The
+        # record column already holds each trace as a JSON document, so this
+        # writes it back out verbatim per row — no re-serialisation that
+        # could reorder keys or lose fields the schema doesn't know about.
+        from traceact.viewer.reader import _sqlite_connect
+
+        self._export_headers(download_name)
+        try:
+            conn = _sqlite_connect(db_path)
+            try:
+                for (raw,) in conn.execute(
+                    "SELECT record FROM traces ORDER BY id ASC"
+                ):
+                    self.wfile.write(raw.encode("utf-8"))
+                    self.wfile.write(b"\n")
+            finally:
+                conn.close()
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            # A locked or malformed database ends the download early; the
+            # client sees a truncated body rather than a hung connection.
             pass
 
     # -- health ------------------------------------------------------------
@@ -772,6 +805,19 @@ def _read_project_from_source(path: str) -> Optional[str]:
             target = os.path.join(path, files[0])
         else:
             target = path
+
+        from traceact.viewer.reader import _sqlite_connect, is_sqlite_file
+        if os.path.isfile(target) and is_sqlite_file(target):
+            conn = _sqlite_connect(target)
+            try:
+                row = conn.execute(
+                    "SELECT record FROM traces ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                return None
+            return json.loads(row[0]).get("project") or None
 
         with open(target, encoding="utf-8") as fh:
             line = fh.readline()

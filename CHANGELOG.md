@@ -2,6 +2,16 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.14.0] — 2026-08-08
+
+### Added
+
+- **SQLite sources: the viewer and `TraceLog` read `SqliteSink` databases natively.** `traceact view data/traces.db` shows the sink's `traces` table and tails new rows live; `TraceLog("data/traces.db")` supports the full filter/query API with semantics identical to a JSONL source; `/api/export` downloads the table as NDJSON; `traceact doctor` validates the database and `--scan` audits its record column (findings reported by table row id). Details that make it safe and correct:
+  - **Detection is by file content** (the SQLite magic header), not extension — `.db`, `.sqlite`, or anything else works, and a JSONL file named `.db` is read as JSONL.
+  - **Connections are read-only with a 0.5s timeout**, so a viewer or query can never lock, block, or hang on the writing application's database. WAL mode (which the sink enables) means reads proceed even during an exclusive write transaction.
+  - **The live tail cursors on the table's autoincrement id** — the exact analogue of a JSONL byte offset. Because the sink upserts by `trace_id`, an updated trace re-surfaces through the tail with a fresh id and replaces its row in the viewer; in-flight streaming stubs collapse in the database itself, and an orphaned stub (a crashed trace) surfaces as a `running` record. A recreated database (reset id sequence) triggers a full re-snapshot, the same response a JSONL source gives a changed inode.
+  - Default `traces` table only; custom `table=` names can be added later if usage calls for it.
+
 ## [0.13.2] — 2026-08-03
 
 ### Added

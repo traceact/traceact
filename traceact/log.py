@@ -322,6 +322,76 @@ class TraceLog:
         c._specs = list(self._specs)
         return c
 
+    def _sqlite_db(self) -> Optional[str]:
+        """
+        The source path when it is a SQLite database (SqliteSink output),
+        else None. Sniffed by magic bytes at read time, consistent with the
+        path itself being resolved at read time.
+        """
+        from traceact.viewer.reader import is_sqlite_file
+        if os.path.isfile(self._path) and is_sqlite_file(self._path):
+            return self._path
+        return None
+
+    def _iter_sqlite_records(self, db: str):
+        """
+        Yield trace dicts from the sink's traces table in insertion order —
+        the SQLite analogue of reading a JSONL file line by line. A database
+        that can't be read (locked past the 0.5s timeout, missing table)
+        yields nothing, the same tolerance shown an unreadable file.
+
+        No in-flight stub bookkeeping is needed here: SqliteSink writes with
+        INSERT OR REPLACE keyed on trace_id, so a final record physically
+        replaces its stubs. A stub row present at read time IS the orphaned
+        (crashed-trace) case, and surfaces as a running trace.
+        """
+        from traceact.viewer.reader import _sqlite_connect
+        try:
+            conn = _sqlite_connect(db)
+        except Exception:
+            return
+        try:
+            for (raw,) in conn.execute(
+                "SELECT record FROM traces ORDER BY id ASC"
+            ):
+                obj = _parse_line(raw)
+                if obj is not None:
+                    yield obj
+        except Exception:
+            return
+        finally:
+            conn.close()
+
+    def _read_bounded_sqlite(
+        self, db: str, n: int, newest: bool
+    ) -> Tuple[List[Dict[str, Any]], bool, bool]:
+        """The _read_bounded loop over table rows instead of file lines."""
+        newest_buf: Deque[Dict[str, Any]] = deque(maxlen=n)
+        oldest_matches: List[Dict[str, Any]] = []
+        rows_scanned = 0
+        total_matches = 0
+        capped = False
+
+        for obj in self._iter_sqlite_records(db):
+            rows_scanned += 1
+            if (self._max_lines_scanned is not None
+                    and rows_scanned > self._max_lines_scanned):
+                capped = True
+                break
+            if not _passes(obj, self._predicates):
+                continue
+            total_matches += 1
+            if newest:
+                newest_buf.append(obj)
+            else:
+                oldest_matches.append(obj)
+                if len(oldest_matches) >= n:
+                    break
+
+        candidates = list(newest_buf) if newest else oldest_matches
+        candidates.sort(key=_started_at_key, reverse=newest)
+        return candidates[:n], capped, total_matches > n
+
     def _read_bounded(
         self, n: int, newest: bool
     ) -> Tuple[List[Dict[str, Any]], bool, bool]:
@@ -371,6 +441,10 @@ class TraceLog:
         """
         if n <= 0:
             return [], False, False
+
+        db = self._sqlite_db()
+        if db is not None:
+            return self._read_bounded_sqlite(db, n, newest)
 
         candidates: List[Dict[str, Any]] = []
         lines_scanned = 0
@@ -460,6 +534,11 @@ class TraceLog:
         matching trace, so there is no smaller candidate set to bound memory
         against the way _read_bounded() does for .last()/.first()/.query().
         """
+        db = self._sqlite_db()
+        if db is not None:
+            return [obj for obj in self._iter_sqlite_records(db)
+                    if _passes(obj, self._predicates)]
+
         results: List[Dict[str, Any]] = []
         for filepath in _jsonl_files(self._path):
             # In-flight streaming appends "running" stubs that the final

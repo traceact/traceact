@@ -138,9 +138,14 @@ def scan_source(path: str) -> Dict[str, Any]:
         }
     """
     from traceact.redaction import find_value_patterns
+    from traceact.viewer.reader import is_sqlite_file
 
     max_hits = 100
     hits: List[Dict[str, Any]] = []
+
+    if os.path.isfile(path) and is_sqlite_file(path):
+        return _scan_sqlite_source(path, max_hits)
+
     files = _jsonl_files(path) if os.path.exists(path) else []
     lines_scanned = 0
     capped = False
@@ -190,6 +195,10 @@ def _check_source(path: str) -> Dict[str, str]:
             "hint": "Double-check the path — the file or folder may have "
                     "been moved, renamed, or deleted since it was added.",
         }
+
+    from traceact.viewer.reader import is_sqlite_file
+    if os.path.isfile(path) and is_sqlite_file(path):
+        return _check_sqlite_source(path)
 
     files = _jsonl_files(path)
     if not files:
@@ -243,5 +252,120 @@ def _check_source(path: str) -> Dict[str, str]:
             "None of the lines matched the expected trace shape (a trace "
             "needs trace_id, action, and started_at). Confirm this file is "
             "TraceAct output and not something else."
+        )
+    return result
+
+
+def _scan_sqlite_source(path: str, max_hits: int) -> Dict[str, Any]:
+    """
+    The credential scan over a SQLite source's record column. "line" in each
+    hit is the table row id, which is what a follow-up
+    `SELECT record FROM traces WHERE id = ?` needs to inspect the finding.
+    """
+    from traceact.redaction import find_value_patterns
+    from traceact.viewer.reader import _sqlite_connect
+
+    hits: List[Dict[str, Any]] = []
+    rows_scanned = 0
+    capped = False
+    try:
+        conn = _sqlite_connect(path)
+        try:
+            for row_id, raw in conn.execute(
+                "SELECT id, record FROM traces ORDER BY id ASC"
+            ):
+                rows_scanned += 1
+                for pattern_name in find_value_patterns(raw):
+                    if len(hits) >= max_hits:
+                        capped = True
+                        break
+                    hits.append({
+                        "pattern": pattern_name,
+                        "file": path,
+                        "line": row_id,
+                    })
+                if capped:
+                    break
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return {
+        "ok": not hits,
+        "files": 1 if rows_scanned or os.path.exists(path) else 0,
+        "lines": rows_scanned,
+        "hits": hits,
+        "hits_capped": capped,
+    }
+
+
+def _check_sqlite_source(path: str) -> Dict[str, str]:
+    """
+    Validate a SQLite source: the sink's `traces` table must exist, and its
+    record column must hold parseable trace documents. This is the loud
+    counterpart to the reader's tolerance — the viewer shows an unreadable
+    database as simply empty, and this check says why.
+    """
+    from traceact.viewer.reader import _sqlite_connect
+
+    try:
+        conn = _sqlite_connect(path)
+        try:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='traces'"
+            ).fetchone()
+            if table is None:
+                return {
+                    "label": "source", "status": "fail",
+                    "message": f"{path}: SQLite database with no 'traces' "
+                               "table",
+                    "hint": "The viewer reads SqliteSink output, which "
+                            "writes a 'traces' table. A custom table= name "
+                            "isn't supported yet; this database may not be "
+                            "TraceAct output at all.",
+                }
+            total = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+            sample = conn.execute(
+                "SELECT record FROM traces ORDER BY id ASC LIMIT 50"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {
+            "label": "source", "status": "fail",
+            "message": f"Could not read {path}: {exc}",
+            "hint": "Check file permissions, or whether another process "
+                    "holds a long write lock on the database.",
+        }
+
+    if total == 0:
+        return {
+            "label": "source", "status": "info",
+            "message": f"{path}: SQLite source, no trace rows yet.",
+        }
+
+    valid = 0
+    for (raw,) in sample:
+        try:
+            if is_valid_trace(json.loads(raw)):
+                valid += 1
+        except (json.JSONDecodeError, ValueError):
+            pass
+    passed = valid > 0
+    result = {
+        "label": "source",
+        "status": "pass" if passed else "fail",
+        "message": (
+            f"{path}: SQLite source, {total} row(s); {valid}/{len(sample)} "
+            "sampled record(s) look like valid traces"
+        ),
+    }
+    if not passed:
+        result["hint"] = (
+            "The traces table exists but its record column doesn't hold "
+            "TraceAct trace documents. Confirm this database was written "
+            "by SqliteSink."
         )
     return result

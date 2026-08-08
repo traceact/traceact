@@ -59,6 +59,7 @@ This starts a server at `http://127.0.0.1:8765` and opens your browser. The view
 |---|---|
 | A `.jsonl` file | Tails that file live |
 | A folder | Merges all `.jsonl` files inside (e.g. per-process shards) |
+| A SQLite database (`SqliteSink` output) | Reads the `traces` table and tails new rows live — detected by file content, any extension works |
 | Nothing | Opens empty; use the in-app modal to add a source |
 
 ### CLI flags

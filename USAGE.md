@@ -935,6 +935,8 @@ configure(sinks=[AsyncSink([SqliteSink("data/traces.db")])])
 
 **Write errors** are printed to stderr and never propagated to the caller — a database hiccup doesn't interrupt the traced function.
 
+**Viewing and querying the database directly:** the viewer and `TraceLog` both read SqliteSink output natively — `traceact view data/traces.db` tails new rows live, `/api/export` downloads the table as NDJSON, `traceact doctor data/traces.db [--scan]` validates and audits it, and `TraceLog("data/traces.db")` supports the full filter/query API with identical semantics to a JSONL source. No conversion step.
+
 ### HttpSink
 
 POSTs each finished trace as a JSON body to an HTTP or HTTPS endpoint. Uses stdlib `urllib` only — zero extra dependencies.
@@ -1072,9 +1074,10 @@ If no sinks are configured when a trace finishes, TraceAct falls back to `Consol
 from traceact import TraceLog
 
 log = TraceLog("data/traces/traces.jsonl")   # file or folder
+log = TraceLog("data/traces.db")             # SqliteSink database
 ```
 
-A folder source behaves the same as in the viewer: all `.jsonl` files inside it are merged on every read.
+A folder source behaves the same as in the viewer: all `.jsonl` files inside it are merged on every read. A SQLite source (SqliteSink output, detected by file content) reads the sink's `traces` table with identical filter and query semantics; connections are read-only with a short timeout, so queries never lock the writing application.
 
 ### Filtering
 
@@ -1423,6 +1426,7 @@ traceact show [SOURCE]     # alias of view (identical)
 
 - a `.jsonl` file — `traceact view data/traces.jsonl`
 - a folder of `.jsonl` files — `traceact view data/traces/` (merges every file inside, e.g. per-process shards or several apps' files)
+- a SQLite database written by `SqliteSink` — `traceact view data/traces.db`. Detected by file content (the SQLite magic header), so any extension works. The viewer reads the sink's `traces` table (the default; custom `table=` names aren't supported yet) with a read-only, short-timeout connection, so it can never lock or block the writing application, and tails new rows live. Because `SqliteSink` upserts by `trace_id`, an updated trace re-surfaces through the tail and replaces its row in the log — in-flight streaming stubs collapse in the database itself.
 - omitted — `traceact view` opens empty and prompts you to add a source
 
 The viewer reads any line that parses as JSON and looks like a trace; malformed entries are skipped, so files being appended to concurrently are safe to read.

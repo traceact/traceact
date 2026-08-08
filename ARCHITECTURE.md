@@ -61,7 +61,7 @@ Ordering facts that constrain extensions:
 
 ```mermaid
 flowchart LR
-    files[".jsonl files<br/>(one per app, or folders of shards)"]
+    files["Sources<br/>.jsonl files, folders of shards,<br/>SqliteSink databases"]
 
     subgraph server ["ViewerServer (stdlib ThreadingHTTPServer)"]
         gate["Token gate (opt-in)<br/>every /api/* route"]
@@ -111,7 +111,7 @@ Coordination contracts:
 | `log.py` — `TraceLog` | Programmatic queries over JSONL | Terminal calls re-read the source; bounded memory for `last`/`first`/`query`; collapses in-flight stubs, keeps orphaned ones |
 | `propagation.py` / `middleware.py` | Cross-service linking via two headers | `traceact-trace-id` → `upstream_trace_id` (lineage); `traceact-correlation-id` passed through untouched (grouping) |
 | `viewer/server.py` | HTTP surface | All routes under one handler; token and base-path checks before dispatch |
-| `viewer/reader.py` — `SourceReader` | Snapshot + live tail | Byte offsets per file; inode change forces full re-snapshot; last-wins in-flight dedupe |
+| `viewer/reader.py` — `SourceReader` | Snapshot + live tail (JSONL and SQLite) | Byte offsets per file / autoincrement-id cursor per database; inode change or reset id sequence forces full re-snapshot; last-wins in-flight dedupe; SQLite reads are read-only with a 0.5s timeout |
 | `viewer/instance.py` | Single-instance coordination, `launch_or_connect()` | State-file probe before reuse; running instance's base path and token win |
 | `integrations/` | Optional framework adapters | Import their framework only when imported themselves; `import traceact` stays zero-dependency; adapter callbacks never raise into the host |
 
