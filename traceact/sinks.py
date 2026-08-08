@@ -713,6 +713,11 @@ _KIND_TO_OTLP: Dict[str, int] = {
     # semantic conventions specify execute-tool spans as INTERNAL — the tool
     # runs inside the agent's process; any network call it makes is its own
     # CLIENT span.
+    #
+    # Also deliberately absent: "gate" and "qstate" → INTERNAL. Simulated
+    # circuit execution happens in-process; a submission to remote quantum
+    # hardware is the client library's own HTTP call, which is where the
+    # CLIENT span belongs.
 }
 
 # Map TraceAct `status` to OTel StatusCode.

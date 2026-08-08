@@ -274,6 +274,8 @@ trace.event(
 | `"file"` | File reads, writes, deletes |
 | `"model"` | LLM / AI model calls |
 | `"tool"` | An agent invoking a named capability: search, code interpreter, MCP tool |
+| `"gate"` | A quantum gate applied to qubits (an operation on the system) |
+| `"qstate"` | A quantum state observation: statevector snapshot, probability distribution (heavy payloads belong in a sidecar, referenced from the event — see the payload budget) |
 | `"cache"` | Cache reads and writes |
 | `"queue"` | Queue publishes and consumes |
 | `"auth"` | Authentication and authorisation |
@@ -401,6 +403,8 @@ trace.touch(kind="http_endpoint", target="stripe")
 | `"auth"` | `"auth_provider"` |
 | `"email"` | `"email_service"` |
 | `"tool"` | `"tool"` |
+| `"gate"` | `"qubit"` |
+| `"qstate"` | `"qubit"` |
 
 ---
 

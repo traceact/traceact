@@ -112,6 +112,14 @@ _EVENT_TO_TOUCH_KIND: Dict[str, str] = {
     "auth":  "auth_provider",
     "email": "email_service",
     "tool":  "tool",
+    # Quantum circuit tracing (used by downstream instrumentation such as
+    # Qlens). A gate event acts on qubits; a qstate event observes them —
+    # two kinds because they feed different consumers (circuit rendering vs
+    # state visualisation) under opposite capture policies (batched vs
+    # sparse). Both resolve to "qubit" touches, so a trace's touch list
+    # answers "which qubits were involved" regardless of how.
+    "gate":   "qubit",
+    "qstate": "qubit",
 }
 
 

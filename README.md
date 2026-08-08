@@ -207,6 +207,8 @@ pytest
 
 ## Full reference
 
+See [ARCHITECTURE.md](https://github.com/traceact/traceact/blob/main/ARCHITECTURE.md) for the recording-pipeline and viewer diagrams with per-component contracts.
+
 See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md) for complete API documentation: all decorator and context manager parameters, helper methods (`trace.db`, `trace.http`, `trace.file`, `trace.model`, `trace.tool`, `trace.queue`), input capture, queue and background job tracing, parent/child traces, sinks, budget configuration, the trace record schema, test isolation, and the full viewer server API.
 
 ## License

@@ -2,6 +2,13 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.13.2] — 2026-08-03
+
+### Added
+
+- **Standard event kinds `"gate"` and `"qstate"`** for quantum circuit instrumentation (used by downstream tooling such as Qlens). A `gate` event is an operation applied to qubits; a `qstate` event is an observation recorded about them — two kinds because they feed different consumers (circuit rendering vs state visualisation) under opposite capture policies (batched vs sparse). Both derive `qubit` touches, so a trace's touch list answers "which qubits were involved" regardless of how; both export to OTLP as INTERNAL spans (simulation is in-process; a submission to remote hardware is the client library's own HTTP call). Heavy state payloads belong in a sidecar file referenced from the event, not in the record — the payload budget truncates values over `max_payload_bytes`.
+- **`ARCHITECTURE.md`** — recording-pipeline and viewer diagrams, per-component contracts, and the ordering facts that constrain extensions (the sanitiser runs before sinks; final records supersede in-flight stubs; sink failures never raise).
+
 ## [0.13.1] — 2026-08-02
 
 ### Fixed
