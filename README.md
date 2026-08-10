@@ -65,7 +65,35 @@ traceact view data/traces.jsonl
 
 This starts a server at `http://127.0.0.1:8765` and opens your browser. The viewer tails the file live: traces appear as your app writes them.
 
-Add `--map` to land straight on the animated trace map for the newest trace instead of the log — see [USAGE.md's Quickstart](https://github.com/traceact/traceact/blob/main/USAGE.md#quickstart) for a full copy-paste example.
+### See it in the map
+
+`--map` opens the browser straight onto the animated trace map for the newest trace, instead of the log. Save this as `demo.py`:
+
+```python
+import time
+from traceact import ActionTrace, configure, JsonlSink
+
+configure(project="quickstart", sinks=[JsonlSink("demo_traces.jsonl")])
+
+with ActionTrace.start(action="order.checkout", kind="app", actor="user") as trace:
+    trace.step("Validated cart")
+    trace.event(kind="db", operation="select", target="inventory")
+    time.sleep(0.05)
+    trace.step("Reserved stock")
+    trace.event(kind="http", operation="POST", target="payments-api")
+    time.sleep(0.05)
+    trace.step("Charged card")
+    trace.event(kind="db", operation="insert", target="orders")
+    trace.output({"order_id": "ord_789"})
+```
+
+Then, one line:
+
+```bash
+python3 demo.py && traceact view demo_traces.jsonl --map
+```
+
+No account, no config file, no auth — the viewer has none by default. Full write-up (with what each part of the record means): [USAGE.md's Quickstart](https://github.com/traceact/traceact/blob/main/USAGE.md#quickstart).
 
 ### Source types
 
