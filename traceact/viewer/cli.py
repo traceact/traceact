@@ -15,13 +15,13 @@
 #
 # On `view`/`show`:
 # Both names are kept deliberately, as aliases of one command, until a single
-# preferred verb is chosen. They share one handler, so there is no duplicated
+# preferred verb is chosen. They share one handler, so there's no duplicated
 # behaviour — only two spellings pointing at the same code.
 #
 # Flags:
 #   --port N        port to serve on (default 8765; auto-increments if taken)
 #   --host HOST     interface to bind (default 127.0.0.1, localhost only)
-#   --no-browser    start the server but do not open a browser tab
+#   --no-browser    start the server but don't open a browser tab
 
 import argparse
 import secrets

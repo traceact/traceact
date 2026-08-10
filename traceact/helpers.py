@@ -17,7 +17,7 @@
 # trace it belongs to.
 #
 # All helpers use "target" as the resource field name. Aliases like "table",
-# "url", or "path" are not accepted — the grammar stays consistent across all
+# "url", or "path" aren't accepted — the grammar stays consistent across all
 # kinds so that traces are uniform regardless of the operation type.
 
 from typing import Any

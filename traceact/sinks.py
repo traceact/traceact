@@ -14,7 +14,7 @@
 #   "buffered"  — the record is held in memory; write() is called on flush().
 #   "disabled"  — write() is never called.
 #
-# The actual sink_mode logic lives in trace.py (_write_to_sinks). Sinks do not
+# The actual sink_mode logic lives in trace.py (_write_to_sinks). Sinks don't
 # need to know which mode is active — they just write when asked.
 #
 # Future sinks (SqliteSink, HttpSink, OpenTelemetrySink) will follow the same
@@ -199,7 +199,7 @@ class JsonlSink:
         # Scope and limits:
         # This lock only coordinates writers inside one process. It does NOT
         # coordinate separate processes writing to the same file — a threading
-        # lock is not shared across process boundaries. For multi-process
+        # lock isn't shared across process boundaries. For multi-process
         # concurrency, have each process write its own file (for example
         # traces.<pid>.jsonl) and point the viewer at the containing folder,
         # which merges them. See the async sink and the docs for more.
@@ -310,7 +310,7 @@ class ConsoleSink:
 #
 # Thread safety:
 # A single sqlite3 connection is kept open per SqliteSink. SQLite connections
-# are not safe to share across threads by default; we pass check_same_thread=
+# aren't safe to share across threads by default; we pass check_same_thread=
 # False and guard every write with a threading.Lock. For high-concurrency
 # workloads, wrap this sink in AsyncSink — that serialises all writes to a
 # single background thread, making the lock a no-op.
@@ -1118,11 +1118,11 @@ class OtlpSink:
 #   2. Shutdown — buffered records must reach the sinks before the process
 #      exits, or traces are silently lost. Handled via close() and an atexit
 #      hook that flushes and stops the worker.
-#   3. Fork safety — a background thread does not survive os.fork(). An app that
+#   3. Fork safety — a background thread doesn't survive os.fork(). An app that
 #      forks worker processes would end up with a dead worker in each child.
 #      Handled with os.register_at_fork where available.
 
-# A private sentinel object used to tell the worker thread to stop. It is placed
+# A private sentinel object used to tell the worker thread to stop. It's placed
 # on the queue by close(); when the worker pulls it, it drains anything left and
 # exits. Using a unique object (rather than None) means it can never be confused
 # with a real record.
@@ -1196,7 +1196,7 @@ class AsyncSink:
         self.on_full = on_full
 
         # A bounded queue is the buffer between the app and the worker. Bounding
-        # it is what makes backpressure possible — an unbounded queue would grow
+        # it's what makes backpressure possible — an unbounded queue would grow
         # without limit under overload and eventually exhaust memory.
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue)
 
@@ -1207,7 +1207,7 @@ class AsyncSink:
         # callers can check it, log it, or expose it in a health endpoint. The
         # developer chooses whether to act on drops; the library never hides them.
         #
-        # Guarded by its own lock because it is written by app threads (or the
+        # Guarded by its own lock because it's written by app threads (or the
         # worker for drop_oldest) and read by callers concurrently.
         self._dropped = 0
         self._dropped_lock = threading.Lock()
@@ -1226,7 +1226,7 @@ class AsyncSink:
 
         # Register a fork handler so that a child process created via os.fork()
         # gets a fresh worker thread instead of inheriting a dead one. Not all
-        # platforms provide register_at_fork (Windows does not), so guard it.
+        # platforms provide register_at_fork (Windows doesn't), so guard it.
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(after_in_child=self._reinit_after_fork)
 
@@ -1255,7 +1255,7 @@ class AsyncSink:
         self._ensure_started()
 
         if self.on_full == "block":
-            # Block until there is space. This is the only policy that can stall
+            # Block until there's space. This is the only policy that can stall
             # the caller; it trades hot-path latency for zero loss.
             self._queue.put(record)
             return
@@ -1326,7 +1326,7 @@ class AsyncSink:
             )
             self._worker.start()
             self._started = True
-            # Flush on interpreter exit so buffered records are not lost by a
+            # Flush on interpreter exit so buffered records aren't lost by a
             # script that never calls close() itself.
             atexit.register(self.close)
 

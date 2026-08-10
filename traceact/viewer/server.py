@@ -31,7 +31,7 @@
 # localhost server has: on a shared machine, a *different OS user* can reach
 # 127.0.0.1 and would otherwise read traces through a server running with this
 # user's file permissions. The token lives in ~/.traceact/viewer.json (mode
-# 0600), so same-user tools pick it up transparently and other users cannot.
+# 0600), so same-user tools pick it up transparently and other users can't.
 # Default is no token: fully open to local callers, as it always was.
 #
 # Why SSE and not WebSockets:
@@ -354,7 +354,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # The asset URLs carry no version, so a cached copy would survive a
         # package upgrade and serve the old UI against the new server.
-        self.send_header("Cache-Control", "no-cache")
+        # no-cache only forces revalidation; no-store stops the browser's
+        # own heuristic caching from serving a stale copy in the meantime.
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -431,11 +433,11 @@ class _Handler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(handle, self.wfile)
         except (OSError, BrokenPipeError, ConnectionResetError):
             # The browser hung up mid-download. Headers are already sent, so
-            # there is no status left to change; just stop writing.
+            # there's no status left to change; just stop writing.
             pass
 
     def _export_merged(self, files: List[str], download_name: str) -> None:
-        # Length is unknown ahead of a lazy merge, so it is omitted and the
+        # Length is unknown ahead of a lazy merge, so it's omitted and the
         # body ends at connection close (HTTP/1.0, same as /api/stream).
         self._export_headers(download_name)
         try:

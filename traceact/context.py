@@ -71,7 +71,7 @@ def is_skip(value: Any) -> bool:
 #   ActionTrace   — a live trace that @traced_action or ActionTrace.start() created
 #   SKIP          — we are inside a sampled-out trace; everything is suppressed
 #
-# The variable is module-level so it is truly global (one per interpreter), but
+# The variable is module-level so it's truly global (one per interpreter), but
 # ContextVar ensures each asyncio Task and each thread sees its own independent
 # value. Two concurrent requests will never interfere with each other's active
 # trace.

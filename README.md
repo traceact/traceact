@@ -26,22 +26,34 @@ configure(
 
 @traced_action(action="note.create", kind="app", actor="user")
 def create_note(title, body):
-    ...
+    return {"note_id": "note_123"}
+
+create_note("Hello", "World")
 ```
 
-Each traced function call produces one JSON object appended to the JSONL file the moment it finishes — writes are immediate by default, so the viewer shows traces as your app runs. Without any `configure()` at all, traces print to stdout instead of vanishing.
+That call appends one JSON object to `data/traces.jsonl` the instant it finishes:
 
-## Manual tracing
-
-```python
-from traceact import ActionTrace
-
-with ActionTrace.start(action="note.create", kind="app") as trace:
-    trace.input({"title": "Hello"})
-    trace.step("Validated input")
-    trace.event(kind="db", operation="insert", target="notes")
-    trace.output({"note_id": "note_123"})
+```json
+{
+  "trace_id": "trc_ccc9be1639a8",
+  "root_trace_id": "trc_ccc9be1639a8",
+  "parent_trace_id": null,
+  "project": "my-app",
+  "action": "note.create",
+  "kind": "app",
+  "actor": "user",
+  "status": "completed",
+  "started_at": "2026-08-10T22:39:00.739Z",
+  "ended_at": "2026-08-10T22:39:00.740Z",
+  "duration_ms": 0.361,
+  "steps": [],
+  "events": [],
+  "touches": [],
+  "errors": []
+}
 ```
+
+Writes are immediate by default, so the viewer (next) shows traces as your app runs. Without any `configure()` at all, traces print to stdout instead of vanishing.
 
 ## The viewer
 
@@ -108,6 +120,18 @@ traceact doctor [SOURCE]
 
 Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md#viewing-traces) for full output and exit-code details.
 
+## Manual tracing
+
+```python
+from traceact import ActionTrace
+
+with ActionTrace.start(action="note.create", kind="app") as trace:
+    trace.input({"title": "Hello"})
+    trace.step("Validated input")
+    trace.event(kind="db", operation="insert", target="notes")
+    trace.output({"note_id": "note_123"})
+```
+
 ## Concepts
 
 | Concept | Meaning |
@@ -122,7 +146,7 @@ Checks Python version, that `~/.traceact` is writable, whether a viewer is alrea
 
 TraceAct exists to give you X-ray vision for your code. That means nothing TraceAct does itself should take that vision away.
 
-Wherever TraceAct might skip, drop, or truncate data, there is a signal for it. Events truncated by a budget limit set the `budget_hit` flag. Records dropped by `AsyncSink` under backpressure increment `AsyncSink.dropped`. A failure inside a sampled-out trace is recorded anyway (with `always_trace_errors`, on by default) and marked `sampled_out` so you know its detail was not captured. The one deliberate silence is a sampled-out *success* — that's what sampling is for — and it's opt-in through `sample_rate`.
+Wherever TraceAct might skip, drop, or truncate data, there's a signal for it. Events truncated by a budget limit set the `budget_hit` flag. Records dropped by `AsyncSink` under backpressure increment `AsyncSink.dropped`. A failure inside a sampled-out trace is recorded anyway (with `always_trace_errors`, on by default) and marked `sampled_out` so you know its detail wasn't captured. The one deliberate silence is a sampled-out *success* — that's what sampling is for — and it's opt-in through `sample_rate`.
 
 The design choice is always: **silent by default, observable by choice**. You decide whether to log, alert on, or ignore those signals. TraceAct never makes that decision for you.
 
@@ -137,7 +161,7 @@ handler = TraceActCallbackHandler()
 chain.invoke(inputs, config={"callbacks": [handler]})
 ```
 
-Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Prompt text is not recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
+Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Prompt text isn't recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
 
 Captured values are guarded twice: field-name redaction (`password`, `api_key`, …) plus default-on content scanning that catches credential formats (AWS keys, `sk-` tokens, JWTs, PEM blocks) wherever they appear — even in a field named `location` or mid-sentence in free text. `traceact doctor --scan` runs the same registry over trace files already on disk.
 

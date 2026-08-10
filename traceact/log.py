@@ -513,7 +513,7 @@ class TraceLog:
             candidates.extend(newest_buf if newest else oldest_matches)
             if capped:
                 # A source-wide cap was hit inside this file; later files in
-                # the source are not read at all, matching the "stop as soon
+                # the source aren't read at all, matching the "stop as soon
                 # as the cap is reached" contract rather than reading further
                 # files while under-reporting the ones already skipped.
                 break

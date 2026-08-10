@@ -43,7 +43,7 @@ flowchart LR
 Ordering facts that constrain extensions:
 
 - The sanitiser runs at capture time (`trace.input()`, `trace.event()`),
-  **before** any sink sees the record. A sink cannot recover a value the
+  **before** any sink sees the record. A sink can't recover a value the
   sanitiser removed; anything that must bypass a limit (for example large
   binary payloads) is spooled by the recording side and referenced from the
   record.

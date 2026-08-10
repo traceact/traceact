@@ -231,7 +231,7 @@ def launch_or_connect(
     existing = find_running()
     if existing is not None:
         h, p = existing["host"], existing["port"]
-        # The running viewer's own prefix and token win: it is already bound
+        # The running viewer's own prefix and token win: it's already bound
         # and serving with them, whatever this caller asked for.
         b = existing.get("base_path", "")
         t = existing.get("token")

@@ -9,8 +9,8 @@
 # How a trace is born:
 # 1. A @traced_action decorator fires, or ActionTrace.start() is called.
 # 2. The active trace is read from the ContextVar (context.py).
-# 3. If there is an active trace, the new trace becomes a child of it.
-# 4. If there is no active trace, the new trace becomes a root trace.
+# 3. If there's an active trace, the new trace becomes a child of it.
+# 4. If there's no active trace, the new trace becomes a root trace.
 # 5. The new trace is pushed onto the ContextVar as the new active trace.
 # 6. The wrapped function runs.
 # 7. When the function exits (success or exception), the trace is finished.
@@ -22,8 +22,8 @@
 # Touches and errors are stored in two forms:
 #   - A public list (_touches, _errors) for readable output.
 #   - An internal set (_touch_index, _error_index) for O(1) membership checks.
-# When a new touch or error arrives, it is checked against the index first.
-# If it is already there, nothing is added to the list. This prevents repeated
+# When a new touch or error arrives, it's checked against the index first.
+# If it's already there, nothing is added to the list. This prevents repeated
 # events (e.g. hitting the same DB table 50 times) from filling the trace summary
 # with redundant entries.
 #
@@ -274,7 +274,7 @@ def _resolve_config(
         if local_override.stream_progress is not None:  stream_progress = local_override.stream_progress
 
     # Safety: if the package-level config explicitly set capture_inputs=False,
-    # that is the global kill switch and it cannot be overridden by a decorator.
+    # that's the global kill switch and it can't be overridden by a decorator.
     # We re-apply the package setting last to enforce this.
     if pkg is not None and pkg.capture_inputs is False:
         capture_inputs = False
@@ -282,7 +282,7 @@ def _resolve_config(
     # Same rule for event-level inputs: an explicit package-level False is a
     # kill switch no decorator can override. (The *default* is also False, but
     # a default can be opted out of per decorator; an explicit configure()-
-    # level False cannot.)
+    # level False can't.)
     if pkg is not None and pkg.capture_event_inputs is False:
         capture_event_inputs = False
 
@@ -1642,7 +1642,7 @@ def _create_trace(
 
     # --- Check 3: sampling decision ---
     # The coin flip happens before the function runs, so a "kept" decision is
-    # final here — but a "dropped" decision is not: when always_trace_errors
+    # final here — but a "dropped" decision isn't: when always_trace_errors
     # is on, the returned _SkippedTrace watches for an exception and promotes
     # the failure into a record (status=failed, sampled_out=true, no
     # steps/events since nothing was recording). Successful sampled-out

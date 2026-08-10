@@ -2,6 +2,18 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.14.1] — 2026-08-10
+
+### Fixed
+
+- **The package ships no `py.typed` marker**, so PEP 561 tells type checkers to skip it entirely — a strict-mypy consumer got `error: Skipping analyzing "traceact": module is installed, but missing library stubs or py.typed marker  [import-untyped]` on the import line, despite the code being fully annotated. Added `traceact/py.typed` and listed it in `[tool.setuptools.package-data]`; verified it lands in the built wheel. One marker at the package root covers the `traceact.viewer` and `traceact.integrations` subpackages too.
+- **The viewer's static assets (`index.html`, `app.js`, `styles.css`) sent `Cache-Control: no-cache`, not `no-store`.** `no-cache` only forces revalidation; it doesn't stop the browser's own heuristic caching from serving a stale copy against a server that's since upgraded. Now `no-store`.
+
+### Changed
+
+- README quick start now shows the actual JSON record a traced call produces, and the viewer section moved up to follow the quick start directly, ahead of the manual-tracing and reference material.
+- Docs and code comments now use contractions consistently.
+
 ## [0.14.0] — 2026-08-08
 
 ### Added
@@ -27,7 +39,7 @@ All notable changes to TraceAct are documented here.
 
 ### Added
 
-- **`USAGE.md` now ships inside the installed package, not just the sdist and GitHub.** Previously only `pip download --no-binary` (the sdist) carried the full docs locally; a normal `pip install traceact` (the wheel) did not. `USAGE.md`'s source of truth stays at the repo root; the release build copies it into `traceact/` right before packaging, so it's importable-adjacent — `import traceact, os; os.path.dirname(traceact.__file__)` — for air-gapped machines, containers with no egress, or anyone who'd rather not leave the terminal. The root file is the only copy anyone should ever hand-edit; the packaged copy is generated and gitignored.
+- **`USAGE.md` now ships inside the installed package, not just the sdist and GitHub.** Previously only `pip download --no-binary` (the sdist) carried the full docs locally; a normal `pip install traceact` (the wheel) didn't. `USAGE.md`'s source of truth stays at the repo root; the release build copies it into `traceact/` right before packaging, so it's importable-adjacent — `import traceact, os; os.path.dirname(traceact.__file__)` — for air-gapped machines, containers with no egress, or anyone who'd rather not leave the terminal. The root file is the only copy anyone should ever hand-edit; the packaged copy is generated and gitignored.
 
 ## [0.13.0] — 2026-08-01
 
@@ -60,11 +72,11 @@ All notable changes to TraceAct are documented here.
 
 - **Explicit parenting: `ActionTrace.start(parent=...)`.** Parent detection is normally ambient (the enclosing with-block or decorator). Callback-style frameworks break that premise: start and end fire on unrelated stacks and parentage arrives as data. The `parent=` argument accepts it as data. The argument wins over the ambient context; a suppressed parent (disabled, sampled out, depth-capped) suppresses its children, so sampling containment holds; `__exit__` on a never-entered trace finalises the record without touching the context stack, making the pattern thread-safe.
 
-- **LangChain adapter — the first agent framework adapter.** `traceact.integrations.langchain.TraceActCallbackHandler` turns chain, LLM, tool, and retriever runs into traces with correct parent links (via `run_id`/`parent_run_id`) and one shared correlation ID per top-level run. Prompt and response text is not recorded by default; `capture_content=True` opts in and still flows through redaction. Zero-dependency positioning intact: `langchain-core` is imported only when the adapter module is, with a clear error naming the missing package. Tested through LangChain's own dispatch (fake models, real tools, real runnables), not hand-built callbacks — which also caught that langchain-core 1.x passes `serialized=None` and delivers run names as kwargs.
+- **LangChain adapter — the first agent framework adapter.** `traceact.integrations.langchain.TraceActCallbackHandler` turns chain, LLM, tool, and retriever runs into traces with correct parent links (via `run_id`/`parent_run_id`) and one shared correlation ID per top-level run. Prompt and response text isn't recorded by default; `capture_content=True` opts in and still flows through redaction. Zero-dependency positioning intact: `langchain-core` is imported only when the adapter module is, with a clear error naming the missing package. Tested through LangChain's own dispatch (fake models, real tools, real runnables), not hand-built callbacks — which also caught that langchain-core 1.x passes `serialized=None` and delivers run names as kwargs.
 
 - **Value-pattern redaction, on by default.** A second redaction layer that scans captured string *content* for the wire formats of known credential types — AWS keys, `sk-`/`sk_` tokens (OpenAI, Anthropic, Stripe), GitHub and Slack tokens, JWTs, PEM private key blocks, Google API keys, `Bearer` values, and credentials embedded in URLs. Matches become named placeholders (`[redacted:aws-key]`) with surrounding prose intact, closing the hole field-name matching leaves: a key in a field named `location`, or pasted mid-sentence into free text. Only formats distinctive enough to make false positives unlikely are admitted, which is what makes default-on safe; the registry (`traceact.redaction.VALUE_PATTERNS`) is documented in USAGE.md and pinned pattern-by-pattern by the test suite. Disable with `TraceConfig(redact_values=False)`. The deeper recursion this required also closes a redaction hole: dicts nested in lists-of-lists are now redacted by field name too.
 
-- **Capture transforms.** A list-form capture spec can name a transform per field: `capture_inputs=["amount", "user_id:hash", "card_number:last4"]`. `hash` stores a deterministic sha256 prefix (the same value hashes identically across traces and processes, so a hashed ID still correlates — pseudonymisation, not encryption), `last4` keeps the tail, `length` keeps size only. A transform overrides field-name redaction for its field — it is the caller's explicit handling instruction, and redacting a deliberate hash would destroy the correlation that justified it. Unknown transform names raise `ValueError` at construction or decoration time, never silently at capture time.
+- **Capture transforms.** A list-form capture spec can name a transform per field: `capture_inputs=["amount", "user_id:hash", "card_number:last4"]`. `hash` stores a deterministic sha256 prefix (the same value hashes identically across traces and processes, so a hashed ID still correlates — pseudonymisation, not encryption), `last4` keeps the tail, `length` keeps size only. A transform overrides field-name redaction for its field — it's the caller's explicit handling instruction, and redacting a deliberate hash would destroy the correlation that justified it. Unknown transform names raise `ValueError` at construction or decoration time, never silently at capture time.
 
 - **`traceact doctor --scan SOURCE`.** Runs the value-pattern registry over trace files already on disk and reports each finding with pattern, file, and line. Capture-time scanning protects records written from now on; this audits the past. Exits 0 when clean, 1 on any finding — a CI gate in one flag.
 
@@ -80,7 +92,7 @@ All notable changes to TraceAct are documented here.
 ### Fixed
 
 - **Hostile payloads can no longer crash the traced application.** `trace.input()`, `trace.output()`, and event results run inside the traced function's own call, so an exception escaping the sanitiser crashed the app being observed — breaking the `strict=False` promise. Two escape paths existed, both now closed:
-  - A **circular structure** (or one nested thousands of levels deep) raised `RecursionError` through the recursive sanitiser. It now carries path-scoped cycle detection and a 100-level depth cap: cycles become `[circular reference]` at the first back-reference, over-deep branches become `[nested too deep]`, and legitimately shared substructures (the same dict under two keys) are not misread as cycles.
+  - A **circular structure** (or one nested thousands of levels deep) raised `RecursionError` through the recursive sanitiser. It now carries path-scoped cycle detection and a 100-level depth cap: cycles become `[circular reference]` at the first back-reference, over-deep branches become `[nested too deep]`, and legitimately shared substructures (the same dict under two keys) aren't misread as cycles.
   - An **object whose `__str__` raises** escaped through `json.dumps(default=str)`, whose failure was only caught for `TypeError`/`ValueError`. The default hook now guards the `str()` call and the serialisation catch is broadened, so such values degrade to `[TypeName]`.
   - The deeper recursion also closes a redaction hole: a dict inside a list inside a list (`[[{"password": ...}]]`) is now redacted; previously only dicts at the first list level were entered.
 - **Sink write failures in blocking mode are reported to stderr** instead of being swallowed with no signal. `SqliteSink` already printed its own errors; a failing `JsonlSink` (disk full, permissions) lost the record invisibly. `strict=True` still raises, and other configured sinks still receive the record as before.
@@ -181,7 +193,7 @@ All notable changes to TraceAct are documented here.
 
 - **Distributed trace propagation** — link traces across service boundaries via two HTTP headers, kept deliberately separate: `traceact-trace-id` carries causal lineage (received as `upstream_trace_id`), `traceact-correlation-id` carries business-level workflow grouping (received as `correlation_id`, passed through untouched rather than overwritten).
   - **New field: `upstream_trace_id`** — the `trace_id` of the trace in a different service that triggered this one. Present in the trace record schema, `SqliteSink`'s scalar columns (auto-migrated on existing databases), and `OtlpSink`'s span attributes (`traceact.upstream_trace_id`).
-  - **`inject_headers(headers=None)`** — stamps the active trace's ID, and its `correlation_id` when set, into an outbound headers dict. Falls back to forwarding the current incoming propagation context when there's no active trace, so an untraced hop doesn't break the chain. Returns a new dict; the original is not modified.
+  - **`inject_headers(headers=None)`** — stamps the active trace's ID, and its `correlation_id` when set, into an outbound headers dict. Falls back to forwarding the current incoming propagation context when there's no active trace, so an untraced hop doesn't break the chain. Returns a new dict; the original isn't modified.
   - **`propagate(headers)`** — context manager for manual inbound propagation. Accepts the framework's header object directly (`request.headers` on Flask, Django, FastAPI, Starlette) or a plain dict in any casing — header name matching is case-insensitive regardless of input shape. Sets `upstream_trace_id` and `correlation_id` on all traces started inside the block; an explicit value passed to `ActionTrace.start()`/`@traced_action` always wins. Thread-safe and async-safe via `contextvars`.
   - **`extract_trace_id(headers)` / `extract_correlation_id(headers)`** — standalone header-parsing helpers, exported for callers who want the raw values without the context-manager form.
   - **`TraceActMiddleware`** — WSGI middleware for Flask and Django. Zero config beyond `app.wsgi_app = TraceActMiddleware(app.wsgi_app)`. Streaming-safe: holds the propagation context until the response iterable is closed (not just until the view function returns), so traces started while generating a streamed body still see it.

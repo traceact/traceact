@@ -15,7 +15,7 @@
 # 3. The wrapper calls _create_trace() to build (or skip) a trace.
 # 4. If the trace is a _SkippedTrace, SKIP is pushed onto the ContextVar and
 #    the function runs without recording anything.
-# 5. If the trace is a real ActionTrace, it is pushed onto the ContextVar as
+# 5. If the trace is a real ActionTrace, it's pushed onto the ContextVar as
 #    the active trace, inputs are optionally captured, the function runs, and
 #    the trace is finished on success or failure.
 # 6. The ContextVar is always restored in a finally block.
@@ -30,7 +30,7 @@
 # the positional and keyword arguments to their parameter names via
 # inspect.signature(), applies redaction and size limits, and stores the result
 # on the trace's inputs dict. This never breaks the function call — if capture
-# fails for any reason, it is silently skipped (unless strict=True).
+# fails for any reason, it's silently skipped (unless strict=True).
 #
 # Why capture_inputs is folded into the TraceConfig override at decoration time:
 # @traced_action(capture_inputs=...) is a convenience shorthand for the same
@@ -38,13 +38,13 @@
 # Both must resolve through _resolve_config() in trace.py — the single place
 # that merges package defaults, configure()-level settings, and this trace's
 # override, and that enforces the "package-level capture_inputs=False is a
-# global kill switch a decorator cannot override" rule. If the wrapper gated
+# global kill switch a decorator can't override" rule. If the wrapper gated
 # capture on the raw decorator-local `capture_inputs` value instead, package-
 # level configure(config=TraceConfig(capture_inputs=True)) would silently do
 # nothing whenever a decorator didn't also repeat capture_inputs=True itself —
 # which is exactly what happened before this was fixed. Folding the shorthand
 # into the config override at decoration time (see decorator(), below) means
-# there is one resolution path, not two independent ones.
+# there's one resolution path, not two independent ones.
 
 import copy
 import functools
@@ -517,7 +517,7 @@ def _capture_inputs(
         sig = inspect.signature(func)
         param_names = list(sig.parameters.keys())
 
-        # Remove "self" and "cls" — instance method receivers are not inputs.
+        # Remove "self" and "cls" — instance method receivers aren't inputs.
         if param_names and param_names[0] in ("self", "cls"):
             param_names = param_names[1:]
             args = args[1:]

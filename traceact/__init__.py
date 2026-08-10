@@ -62,7 +62,7 @@
 #   inject_headers — stamps the active trace's ID (and correlation id, when set)
 #                   into an outbound headers dict so the receiving service can
 #                   link its traces back to the caller. Returns a new dict;
-#                   the original is not modified.
+#                   the original isn't modified.
 #
 #   inject_context — the queue-boundary counterpart of inject_headers. Stamps
 #                   the same context into a job payload dict, which travels
@@ -77,7 +77,7 @@
 #   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
 #                   above for async frameworks.
 
-__version__ = "0.14.0"
+__version__ = "0.14.1"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget

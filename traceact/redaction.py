@@ -99,7 +99,7 @@ REDACTION_PRESETS: dict = {
 # substring: prose around an embedded secret survives.
 #
 # Admission rule for this list: the format must be distinctive enough that a
-# match is almost certainly a credential. A 40-character base64 string is not
+# match is almost certainly a credential. A 40-character base64 string isn't
 # admissible (it describes half the hashes in any system); AKIA + 16 chars is.
 # When a new provider or tool introduces a keyed format, add it here AND to
 # the table in USAGE.md.

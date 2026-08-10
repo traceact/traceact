@@ -5,7 +5,7 @@
 #
 # Why a separate config module?
 # Configuration is shared across the whole package. Every trace, decorator, and
-# sink needs to read the same settings. Centralising them here means there is one
+# sink needs to read the same settings. Centralising them here means there's one
 # place to look when a setting needs to change, and one place to reset when a
 # test has left state behind.
 #
@@ -302,15 +302,15 @@ def reset_config() -> None:
     _package_sinks = []
     _package_project = None
 
-    # Discard any buffered records so one test's buffered traces cannot leak
+    # Discard any buffered records so one test's buffered traces can't leak
     # into the next test's buffer state. Imported here to avoid a circular
-    # import at module load time (sinks.py does not import config.py).
+    # import at module load time (sinks.py doesn't import config.py).
     from traceact.sinks import reset_buffer
     reset_buffer()
 
     # Clear the active trace context so tests start with a clean slate.
     # The deferred import avoids a circular dependency at module load time
-    # (context.py does not import config.py).
+    # (context.py doesn't import config.py).
     from traceact.context import _active_trace
     _active_trace.set(None)
 

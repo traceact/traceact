@@ -19,7 +19,7 @@
 # 2. No use of the ambient trace context. LangChain delivers parentage as
 #    data (run_id / parent_run_id) and may fire the start and end callbacks
 #    of one run on different stacks or threads, so the with-block protocol —
-#    which pins a trace to one stack via a ContextVar token — cannot apply.
+#    which pins a trace to one stack via a ContextVar token — can't apply.
 #    Traces are created with an explicit parent (ActionTrace.start(parent=…))
 #    and finished by calling __exit__ directly, which on a never-entered
 #    trace finalises the record without touching the context stack.
@@ -30,7 +30,7 @@
 #    redaction (including the ai_prompts preset) applies to it.
 #
 # 4. Callbacks must never raise into the host application. Every handler
-#    method swallows its own errors; a callback that cannot record simply
+#    method swallows its own errors; a callback that can't record simply
 #    records nothing. (LangChain also guards handler exceptions, but relying
 #    on the framework's tolerance would make its logging our failure mode.)
 

@@ -37,7 +37,7 @@ htmlcov/
 .claude/
 
 # Internal docs (not committed)
-.internal/
+project/
 
 # Trace output files (generated at runtime)
 *.jsonl

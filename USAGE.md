@@ -126,7 +126,7 @@ configure(
 
 All fields are optional. Omitted fields use package defaults. `configure()` can be called multiple times; later calls replace earlier ones.
 
-**`project`** is the recommended way to name your traces. It is stamped onto every trace produced by this process and used by the viewer to label the source. Traces written without a `project` emit a `UserWarning` at runtime. A per-trace `project=` argument on `@traced_action` or `ActionTrace.start()` overrides the package-level value for that trace only.
+**`project`** is the recommended way to name your traces. It's stamped onto every trace produced by this process and used by the viewer to label the source. Traces written without a `project` emit a `UserWarning` at runtime. A per-trace `project=` argument on `@traced_action` or `ActionTrace.start()` overrides the package-level value for that trace only.
 
 **Sink modes:**
 - `"blocking"` *(default)* — write immediately when a trace finishes. Traces appear in the sink, and the viewer, the moment they complete.
@@ -300,7 +300,7 @@ trace.tool("call", "web_search", input={"query": "traceact"})
 
 The value lands in the event's `input` field. Without the opt-in, `input=` is silently dropped — call sites can pass it unconditionally and let config decide, the same contract as `trace.output()` under `capture_outputs=False`.
 
-Recorded inputs go through the full safety pipeline: field-name redaction for dicts (`{"password": ...}` → `"[redacted]"`), value-pattern scanning, and the `max_payload_bytes` cap. An explicit `capture_event_inputs=False` at the `configure()` level is a global kill switch that a decorator or trace-level config cannot re-enable — the same rule as `capture_inputs`.
+Recorded inputs go through the full safety pipeline: field-name redaction for dicts (`{"password": ...}` → `"[redacted]"`), value-pattern scanning, and the `max_payload_bytes` cap. An explicit `capture_event_inputs=False` at the `configure()` level is a global kill switch that a decorator or trace-level config can't re-enable — the same rule as `capture_inputs`.
 
 ---
 
@@ -662,7 +662,7 @@ def create_note(title, body, user_id):
 
 `capture_inputs=` on the decorator is shorthand for `config=TraceConfig(capture_inputs=...)` — both resolve through the same package-default → `configure()` → decorator-override chain, so a package-level default set via `configure()` is honoured by any decorator that doesn't explicitly override it.
 
-**Global kill switch** (cannot be re-enabled by any decorator, not even one that explicitly passes `capture_inputs=True`):
+**Global kill switch** (can't be re-enabled by any decorator, not even one that explicitly passes `capture_inputs=True`):
 
 ```python
 configure(config=TraceConfig(capture_inputs=False))
@@ -713,7 +713,7 @@ def export_report(...):
     ...
 ```
 
-**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` is not, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name. That hole is what value-pattern redaction (below) exists to close.
+**These are field-name patterns, not content scanning.** A value is redacted because of what its *key* is called, not what it contains. `trace.input({"path": "/Users/mo/secret"})` is redacted by the `filesystem_paths` preset; `trace.input({"location": "/Users/mo/secret"})` isn't, because `"location"` doesn't match any active pattern. This mirrors the baseline mechanism (same substring, case-insensitive matching) — it's simple and has no false-positive risk from scanning arbitrary string content, at the cost of missing secrets stored under an unexpected field name. That hole is what value-pattern redaction (below) exists to close.
 
 ### Value-pattern redaction
 
@@ -724,7 +724,7 @@ trace.input({"note": "call failed using key AKIA..."})
 # stored as: {"note": "call failed using key [redacted:aws-key]"}
 ```
 
-**The registry.** Only formats with distinctive, near-unmistakable signatures are admitted — that is what makes default-on safe. A 40-character base64 string is not admissible (it describes half the hashes in any system); `AKIA` + 16 characters is. Entropy-style guessing is deliberately absent.
+**The registry.** Only formats with distinctive, near-unmistakable signatures are admitted — that is what makes default-on safe. A 40-character base64 string isn't admissible (it describes half the hashes in any system); `AKIA` + 16 characters is. Entropy-style guessing is deliberately absent.
 
 | Pattern name | Catches |
 |---|---|
@@ -773,7 +773,7 @@ def charge(amount, user_id, card_number):
 Notes that matter:
 
 - **A transform overrides field-name redaction for that field.** `card_number` matches the sensitive patterns and would normally store `[redacted]`; naming a transform is the explicit handling instruction for the field, so the transformed value is kept. Size limits and value scanning still apply to it.
-- **`hash` is pseudonymisation, not encryption.** It is deterministic and unsalted so the same value hashes identically across traces and processes — which is what makes a hashed user ID correlatable, and also means anyone holding a candidate value can hash it and compare.
+- **`hash` is pseudonymisation, not encryption.** It's deterministic and unsalted so the same value hashes identically across traces and processes — which is what makes a hashed user ID correlatable, and also means anyone holding a candidate value can hash it and compare.
 - An unknown transform name raises `ValueError` immediately — at `TraceConfig(...)` construction or at decoration time — never silently at capture time.
 
 **Nested redaction example:**
@@ -867,7 +867,7 @@ Three policies for when the queue is full:
 |---|---|---|
 | `"drop_newest"` (default) | Discard the incoming record; count it | Older in-flight records are more diagnostically useful |
 | `"drop_oldest"` | Evict the oldest queued record to make room | Recent traces matter more than historical ones |
-| `"block"` | Stall the calling thread until there is space | Zero loss is required and brief latency is acceptable |
+| `"block"` | Stall the calling thread until there's space | Zero loss is required and brief latency is acceptable |
 
 ```python
 AsyncSink([JsonlSink("traces.jsonl")], max_queue=50_000, on_full="drop_oldest")
@@ -1123,7 +1123,7 @@ log.filter(status="failed").render_table()      # pretty-print to stdout
 log.filter(status="failed").render_table(n=25)  # cap rows shown
 ```
 
-Each terminal call re-reads the JSONL file(s) — there is no caching, so you always get the current state of a live source.
+Each terminal call re-reads the JSONL file(s) — there's no caching, so you always get the current state of a live source.
 
 `last()`/`first()` are memory-bounded: they hold at most `n` matching records per file at once rather than collecting every match before truncating. A broad filter (or no filter at all) over a large source costs memory proportional to `n`, not to how much of the source matches.
 
@@ -1398,13 +1398,13 @@ The full JSON object written to the JSONL sink:
 
 **`budget_hit`** is a separate boolean field, not a status. A trace can be `"completed"` with `budget_hit: true`, meaning the function ran to completion but TraceAct stopped recording events partway through.
 
-**`sampled_out`** is `true` only on a failure record promoted from a sampled-out trace (`always_trace_errors`, on by default — see [Sampling and nested traces](#parent-and-child-traces)). Such a record has `status: "failed"` and the error, but empty `steps`/`events`/`inputs`, because nothing was recording while the action ran. It is `false` on every normally recorded trace.
+**`sampled_out`** is `true` only on a failure record promoted from a sampled-out trace (`always_trace_errors`, on by default — see [Sampling and nested traces](#parent-and-child-traces)). Such a record has `status: "failed"` and the error, but empty `steps`/`events`/`inputs`, because nothing was recording while the action ran. It's `false` on every normally recorded trace.
 
 ---
 
 ## Viewing traces
 
-TraceAct ships with a local, dependency-free web viewer. Installing the package gives you both the SDK and the `traceact` command — there is no separate viewer package to install.
+TraceAct ships with a local, dependency-free web viewer. Installing the package gives you both the SDK and the `traceact` command — there's no separate viewer package to install.
 
 ```bash
 pip install traceact
@@ -1462,7 +1462,7 @@ Token auth is on: API requests need the token from the URL above
 
 - Every `/api/*` request must carry the token — `X-TraceAct-Token` header for API clients, `?token=` query param for the browser (whose EventSource and download links can't set headers). Requests without it get `403`.
 - The page shell and static assets stay open; they're the same bytes anyone gets from `pip install traceact`. All trace data flows through the gated API.
-- The token is generated in-process and reaches clients through exactly two channels: the printed URL, and `~/.traceact/viewer.json` (written with mode `0600`). It is never accepted as a command-line value — a token in `traceact view --token abc123` would be readable by every user on the machine via the process list.
+- The token is generated in-process and reaches clients through exactly two channels: the printed URL, and `~/.traceact/viewer.json` (written with mode `0600`). It's never accepted as a command-line value — a token in `traceact view --token abc123` would be readable by every user on the machine via the process list.
 - Same-user tools need no wiring: `launch_or_connect()`, `traceact view` reuse, and `traceact doctor` read the token from the state file and authenticate automatically. Other OS users can't read that file, and that asymmetry is the entire mechanism.
 - On single-instance reuse the running viewer's setting wins, same as `--base-path`: token auth is fixed when a server starts. Asking for a token while an untokened viewer is running prints a notice to stderr and reuses it as it stands.
 - A browser page opened without the token shows "this viewer requires a token" rather than an empty trace log, and learns nothing — not even source names.
@@ -1538,9 +1538,9 @@ The Terminal window stays open so Ctrl+C stops the viewer. To pass a source file
 ### What the viewer shows
 
 - **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target, against the currently tailed rows. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view. A pre-filtered view opened via `TraceLog.view()` instead searches the full source on disk — see [Server-side search](#server-side-search-apiquery) below.
-- **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it is a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
+- **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it's a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
 - **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play. The map zooms and pans: the mouse wheel zooms about the cursor, left-drag pans, and the `+` / `−` / `⟲` buttons zoom about the centre and reset to 1×. Zoom is clamped to 0.2×–5× and resets when you select a different trace.
-- **Source export** — each source row in the source picker shows a `⤓` button on hover. Clicking it downloads the full source as a `.jsonl` file via `/api/export`. The download is a snapshot as of the moment the request is made; traces written after it are not included.
+- **Source export** — each source row in the source picker shows a `⤓` button on hover. Clicking it downloads the full source as a `.jsonl` file via `/api/export`. The download is a snapshot as of the moment the request is made; traces written after it aren't included.
 - **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
 
 ### Run diagnostics (Settings)
@@ -1563,7 +1563,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | `GET` | `/api/query?source=NAME&field[__op]=value&limit=N` | — | `{"traces":[...],"scan_capped":bool,"limit_reached":bool,"count":N}` |
 | `GET` | `/api/export?source=NAME` | — | `.jsonl` file download (`application/x-ndjson`) |
 
-`/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path cannot be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
+`/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path can't be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
 
 When the viewer is mounted at a `base_path`, all endpoints above are served under that prefix (e.g. `/audit-viewer/api/export`). Requests at the unprefixed paths return 404.
 
@@ -1582,11 +1582,11 @@ GET /api/query?source=traces&status=failed&action__contains=order&limit=200
 ```
 
 - Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls. Because `source` and `limit` are reserved for the endpoint itself, trace fields with those two names can't be filtered over HTTP — use `TraceLog.filter()` directly for that.
-- `__re` is not accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
+- `__re` isn't accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
 - **`limit` is hard-capped at 1000 server-side.** Requesting `limit=5000` against a source with 3000 matches returns only the newest 1000 — but not silently: `count` in the response is the count *returned*, not the count that matched, and `limit_reached` (below) tells you whether more may exist.
 - The response carries two separate completeness flags, both `false` when the result is everything that matched:
   - **`scan_capped`** — `true` if the scan hit its internal line-read ceiling before finishing reading the source.
-  - **`limit_reached`** — `true` if more traces matched than `limit` allowed back (including when a too-large requested `limit` was clamped to 1000). `count == limit` is not itself a safe signal that nothing more exists — a bounded scan always returns at most `limit` regardless of whether `limit` or a hundred thousand traces matched, so this comes from a count taken during the scan, not from inspecting the returned list's length afterward.
+  - **`limit_reached`** — `true` if more traces matched than `limit` allowed back (including when a too-large requested `limit` was clamped to 1000). `count == limit` isn't itself a safe signal that nothing more exists — a bounded scan always returns at most `limit` regardless of whether `limit` or a hundred thousand traces matched, so this comes from a count taken during the scan, not from inspecting the returned list's length afterward.
 
   Either flag `true` means the same thing to a caller: this may not be every match. The viewer shows "results may be incomplete" next to the pre-filter badges when either is set, rather than presenting a partial result as if it were exhaustive.
 
@@ -1933,12 +1933,12 @@ Every trace in one top-level run shares a `correlation_id` (fresh per run,
 or fix one with `TraceActCallbackHandler(correlation_id=...)`), so
 `TraceLog.filter(correlation_id=...)` pulls a whole run together.
 
-**Prompt and response text is not recorded by default.** Model I/O is the
+**Prompt and response text isn't recorded by default.** Model I/O is the
 most sensitive payload an agent app handles. `capture_content=True` opts in,
 and captured text still flows through `trace.input()`, so redaction applies
 — pair it with `TraceConfig(redaction_presets=["ai_prompts"])` to capture
 structure while stripping prompt-shaped fields. Handler callbacks never
-raise into the host application; a callback that cannot record records
+raise into the host application; a callback that can't record records
 nothing.
 
 ### Without a framework
@@ -2007,7 +2007,7 @@ flips to its final state on completion. `TraceLog` returns one record per
 trace — the final one, or the latest stub for a trace that never finished.
 That orphaned stub is the crash evidence: a `SIGKILL` at step 4 of 7 leaves
 a record saying `running`, 4 steps, last step's label — where on 0.11.0 and
-earlier the trace simply did not exist.
+earlier the trace simply didn't exist.
 
 **Costs, so the trade is explicit:** stub lines accumulate in the file (a
 30s run at the default throttle adds a few KB; `JsonlSink(max_bytes=...)`

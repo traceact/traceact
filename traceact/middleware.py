@@ -24,7 +24,7 @@
 # Streaming responses (WSGI):
 #
 #   A WSGI application that returns a generator body — Flask's
-#   stream_with_context(), Django's StreamingHttpResponse — has not produced any
+#   stream_with_context(), Django's StreamingHttpResponse — hasn't produced any
 #   of that body by the time the application callable returns. The server
 #   iterates the returned iterable afterwards. Clearing the propagation context
 #   in a plain `finally` around the app call would therefore clear it *before*
