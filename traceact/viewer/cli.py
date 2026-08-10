@@ -22,6 +22,7 @@
 #   --port N        port to serve on (default 8765; auto-increments if taken)
 #   --host HOST     interface to bind (default 127.0.0.1, localhost only)
 #   --no-browser    start the server but don't open a browser tab
+#   --map           open straight onto the map for SOURCE's newest trace
 
 import argparse
 import secrets
@@ -97,6 +98,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Serve every route under a path prefix (e.g. /audit-viewer) so "
              "the viewer can sit behind another app's reverse proxy. Defaults "
              "to the root.",
+    )
+    view.add_argument(
+        "--map", action="store_true",
+        help="Open straight onto the Trace map for the newest trace in "
+             "SOURCE, instead of the trace log. Has no effect without "
+             "SOURCE (there's nothing to select onto).",
     )
     view.add_argument(
         "--require-token", action="store_true",
@@ -188,7 +195,8 @@ def _run_view(args: argparse.Namespace) -> int:
             # stream happens to be first — see init() in static/app.js.
             url = _instance._viewer_url(host, port, running_base,
                                         source=source_name,
-                                        token=running_token)
+                                        token=running_token,
+                                        open_map=args.map)
             print(f"Reusing existing viewer at {url}")
             if not args.no_browser:
                 webbrowser.open(url)
@@ -216,7 +224,8 @@ def _run_view(args: argparse.Namespace) -> int:
         return 1
 
     url = _instance._viewer_url(args.host, port, base_path,
-                                source=source_name, token=token)
+                                source=source_name, token=token,
+                                open_map=args.map)
     print(f"TraceAct viewer running at {url}")
     if token:
         print("Token auth is on: API requests need the token from the URL "

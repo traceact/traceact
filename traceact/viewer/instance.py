@@ -106,12 +106,16 @@ def _token_headers(token: Optional[str]) -> dict:
 
 def _viewer_url(host: str, port: int, base_path: str = "",
                 source: Optional[str] = None,
-                token: Optional[str] = None) -> str:
+                token: Optional[str] = None,
+                open_map: bool = False) -> str:
     """
     Build the URL a browser should open for a viewer: the mount root plus
     ``?source=`` (so the app attaches to that source rather than opening the
-    picker) and ``?token=`` (so a token-gated viewer's page can call its own
-    API — the front-end reads it from location.search).
+    picker), ``?token=`` (so a token-gated viewer's page can call its own
+    API — the front-end reads it from location.search), and, with
+    ``open_map=True``, ``view=map&open=latest`` (so the page lands on the
+    trace map for the newest trace instead of the log — see
+    ``traceact view --map`` in cli.py).
     """
     from urllib.parse import quote
 
@@ -120,6 +124,9 @@ def _viewer_url(host: str, port: int, base_path: str = "",
         params.append("source=" + quote(source, safe=""))
     if token:
         params.append("token=" + quote(token, safe=""))
+    if open_map:
+        params.append("view=map")
+        params.append("open=latest")
     query = ("?" + "&".join(params)) if params else ""
     return f"http://{host}:{port}{base_path}/{query}"
 

@@ -45,30 +45,31 @@ tests/            — pytest suite (pip install -e ".[dev]" && pytest)
 ## Contents
 
 1. [Installation](#installation)
-2. [Configuration](#configuration)
-3. [Decorator API](#decorator-api)
-4. [Manual API](#manual-api)
-5. [Recording steps](#recording-steps)
-6. [Recording events](#recording-events)
-7. [Helper methods](#helper-methods)
-8. [Inputs and outputs](#inputs-and-outputs)
-9. [Touches](#touches)
-10. [Errors](#errors)
-11. [Parent and child traces](#parent-and-child-traces)
-12. [Framework recipes](#framework-recipes)
-13. [Queue and background job tracing](#queue-and-background-job-tracing)
-14. [Input capture](#input-capture)
-15. [Sinks](#sinks)
-16. [TraceLog](#tracelog)
-17. [Budget configuration](#budget-configuration)
-18. [TraceConfig fields](#traceconfig-fields)
-19. [Test isolation](#test-isolation)
-20. [Trace record schema](#trace-record-schema)
-21. [Viewing traces](#viewing-traces)
-22. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
-23. [Distributed propagation](#distributed-propagation)
-24. [Tracing agents](#tracing-agents)
-25. [In-flight streaming](#in-flight-streaming)
+2. [Quickstart](#quickstart)
+3. [Configuration](#configuration)
+4. [Decorator API](#decorator-api)
+5. [Manual API](#manual-api)
+6. [Recording steps](#recording-steps)
+7. [Recording events](#recording-events)
+8. [Helper methods](#helper-methods)
+9. [Inputs and outputs](#inputs-and-outputs)
+10. [Touches](#touches)
+11. [Errors](#errors)
+12. [Parent and child traces](#parent-and-child-traces)
+13. [Framework recipes](#framework-recipes)
+14. [Queue and background job tracing](#queue-and-background-job-tracing)
+15. [Input capture](#input-capture)
+16. [Sinks](#sinks)
+17. [TraceLog](#tracelog)
+18. [Budget configuration](#budget-configuration)
+19. [TraceConfig fields](#traceconfig-fields)
+20. [Test isolation](#test-isolation)
+21. [Trace record schema](#trace-record-schema)
+22. [Viewing traces](#viewing-traces)
+23. [Integrating the viewer into your app](#integrating-the-viewer-into-your-app)
+24. [Distributed propagation](#distributed-propagation)
+25. [Tracing agents](#tracing-agents)
+26. [In-flight streaming](#in-flight-streaming)
 
 ---
 
@@ -89,6 +90,43 @@ From a sibling directory (common in monorepo or demo setups):
 ```bash
 pip install -e ../traceact
 ```
+
+---
+
+## Quickstart
+
+Save this as `demo.py`:
+
+```python
+import time
+from traceact import ActionTrace, configure, JsonlSink
+
+configure(project="quickstart", sinks=[JsonlSink("demo_traces.jsonl")])
+
+with ActionTrace.start(action="order.checkout", kind="app", actor="user") as trace:
+    trace.step("Validated cart")
+    trace.event(kind="db", operation="select", target="inventory")
+    time.sleep(0.05)
+    trace.step("Reserved stock")
+    trace.event(kind="http", operation="POST", target="payments-api")
+    time.sleep(0.05)
+    trace.step("Charged card")
+    trace.event(kind="db", operation="insert", target="orders")
+    trace.output({"order_id": "ord_789"})
+```
+
+Then run it and open the map in one line:
+
+```bash
+python3 demo.py && traceact view demo_traces.jsonl --map
+```
+
+`demo.py` writes one trace with three steps and three events (a DB read, an
+HTTP call, a DB write) to `demo_traces.jsonl`. `traceact view ... --map`
+opens a browser tab straight onto that trace's map — the origin, its events
+as connected nodes, replaying automatically — instead of the trace log. No
+account, no config file, no auth: the viewer has none by default (see
+[Token auth](#token-auth) below to turn it on for a shared machine).
 
 ---
 
@@ -1441,6 +1479,7 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 | `--new` | off | Force a new viewer instance even if one is already running. |
 | `--base-path PATH` | *(none)* | Mount the viewer at a subpath (e.g. `/audit-viewer`) for reverse-proxy deployments. |
 | `--require-token` | off | Require a random token on every API request. See [Token auth](#token-auth). |
+| `--map` | off | Open straight onto the Trace map for SOURCE's newest trace, instead of the log. No effect without SOURCE. See [Quickstart](#quickstart). |
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
 

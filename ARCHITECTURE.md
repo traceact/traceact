@@ -98,6 +98,11 @@ Coordination contracts:
   open. The token travels only via the printed URL and the state file.
 - **Selection is explicit**: a tab opened without `?source=` shows the
   source picker; launch paths that know their source pin it in the URL.
+- **Deep-linking to the map**: `traceact view SOURCE --map` adds
+  `view=map&open=latest` to the opened URL. `view` sets the initial tab;
+  `open` auto-selects the newest trace the moment it arrives over the live
+  stream, once, so it never fights a later manual selection. Without the
+  flag both params are absent and behaviour is unchanged.
 
 ## Component contracts
 

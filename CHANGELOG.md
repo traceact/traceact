@@ -2,6 +2,13 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.14.2] — 2026-08-11
+
+### Added
+
+- **`traceact view SOURCE --map`** opens the browser straight onto the trace map for the newest trace in SOURCE, instead of the trace log — one command from a JSONL file to a rendered, auto-playing map. Sets `?view=map&open=latest` on the opened URL; the front-end reads both once at load (`view` forces the initial tab, `open=latest` auto-selects the newest trace as soon as it arrives over the live stream) and normal viewer usage without the flag is unaffected.
+- **USAGE.md gained a Quickstart section**, right after Installation: a copy-paste script that writes one multi-step trace to a JSONL file, and the one-line `python3 demo.py && traceact view demo_traces.jsonl --map` that turns it into a rendered map in the browser. Tested verbatim in the suite so the recipe can't silently drift from the code.
+
 ## [0.14.1] — 2026-08-10
 
 ### Fixed

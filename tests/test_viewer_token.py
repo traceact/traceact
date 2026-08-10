@@ -15,12 +15,14 @@ import json
 import os
 import stat
 import threading
+import time
 import unittest.mock as mock
 import urllib.error
 import urllib.request
 
 import pytest
 
+from traceact import ActionTrace, configure, JsonlSink
 from traceact.viewer import instance
 from traceact.viewer.server import ViewerServer, ViewerState
 
@@ -322,6 +324,21 @@ class TestViewerUrl:
         assert " " not in url
         assert "my%20log%2F1" in url
 
+    def test_open_map_appends_view_and_open_params(self):
+        url = instance._viewer_url("127.0.0.1", 8765, source="agora",
+                                   open_map=True)
+        assert url == "http://127.0.0.1:8765/?source=agora&view=map&open=latest"
+
+    def test_open_map_false_by_default(self):
+        url = instance._viewer_url("127.0.0.1", 8765, source="agora")
+        assert "view=" not in url and "open=" not in url
+
+    def test_open_map_without_source_still_appends(self):
+        # Harmless: the front-end forces the map tab but has nothing to
+        # auto-select, so it shows the map's own "pick a trace" empty state.
+        url = instance._viewer_url("127.0.0.1", 8765, open_map=True)
+        assert url == "http://127.0.0.1:8765/?view=map&open=latest"
+
 
 class TestLaunchOrConnectReuse:
     def test_running_viewers_token_is_used_and_returned(self):
@@ -454,3 +471,121 @@ class TestCliSourcePin:
             ["view", "--no-browser", "/x/traces.jsonl"]))
         assert rc == 0
         assert "?source=agora" in capsys.readouterr().out
+
+
+class TestCliMapFlag:
+    """
+    `traceact view SOURCE --map` is the one-command path to the trace map:
+    a script writes a JSONL file, this opens the viewer straight onto the
+    newest trace's map instead of the log. See VIEW_PARAM/autoOpenPending
+    in static/app.js for the front-end half.
+    """
+
+    def _run_view(self, argv, monkeypatch, tmp_path):
+        from traceact.viewer import cli
+
+        fake_server = mock.MagicMock()
+        fake_server.serve_forever.side_effect = lambda: None
+        monkeypatch.setattr(
+            cli, "_start_server",
+            lambda h, p, s, base_path="", token=None: (fake_server, p),
+        )
+        monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "find_running", lambda: None)
+
+        parser = cli._build_parser()
+        return cli._run_view(parser.parse_args(argv))
+
+    def test_flag_appends_view_and_open_params(self, monkeypatch, tmp_path,
+                                               capsys):
+        src = tmp_path / "traces.jsonl"
+        src.write_text('{"project": "agora", "action": "x"}\n')
+        rc = self._run_view(["view", "--no-browser", "--map", str(src)],
+                            monkeypatch, tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "?source=agora&view=map&open=latest" in out
+
+    def test_without_flag_no_map_params(self, monkeypatch, tmp_path, capsys):
+        src = tmp_path / "traces.jsonl"
+        src.write_text('{"project": "agora", "action": "x"}\n')
+        rc = self._run_view(["view", "--no-browser", str(src)],
+                            monkeypatch, tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "view=" not in out and "open=" not in out
+
+    def test_flag_applies_on_reuse_too(self, monkeypatch, capsys):
+        from traceact.viewer import cli
+
+        monkeypatch.setattr(
+            cli._instance, "find_running",
+            lambda: {"host": "127.0.0.1", "port": 8765, "base_path": "",
+                     "token": None},
+        )
+        monkeypatch.setattr(
+            cli._instance, "add_source_to",
+            lambda *a, **k: {"name": "agora", "path": "/x"},
+        )
+        parser = cli._build_parser()
+        rc = cli._run_view(parser.parse_args(
+            ["view", "--no-browser", "--map", "/x/traces.jsonl"]))
+        assert rc == 0
+        assert "?source=agora&view=map&open=latest" in capsys.readouterr().out
+
+
+class TestQuickstartDocRecipe:
+    """
+    USAGE.md's Quickstart section shows this exact script and CLI command as
+    the copy-paste path to a working trace map. Run verbatim so doc drift
+    (a renamed kwarg, a helper that no longer exists) fails a test instead
+    of a new user's first five minutes.
+    """
+
+    def test_demo_script_produces_a_source_the_map_flag_can_open(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        jsonl_path = tmp_path / "demo_traces.jsonl"
+
+        configure(project="quickstart", sinks=[JsonlSink(str(jsonl_path))])
+
+        with ActionTrace.start(action="order.checkout", kind="app",
+                               actor="user") as trace:
+            trace.step("Validated cart")
+            trace.event(kind="db", operation="select", target="inventory")
+            time.sleep(0.05)
+            trace.step("Reserved stock")
+            trace.event(kind="http", operation="POST", target="payments-api")
+            time.sleep(0.05)
+            trace.step("Charged card")
+            trace.event(kind="db", operation="insert", target="orders")
+            trace.output({"order_id": "ord_789"})
+
+        assert jsonl_path.exists()
+        record = json.loads(jsonl_path.read_text().strip())
+        assert record["status"] == "completed"
+        assert [s["label"] for s in record["steps"]] == [
+            "Validated cart", "Reserved stock", "Charged card",
+        ]
+        assert len(record["events"]) == 3
+        assert record["outputs"] == {"order_id": "ord_789"}
+
+        from traceact.viewer import cli
+
+        fake_server = mock.MagicMock()
+        fake_server.serve_forever.side_effect = lambda: None
+        monkeypatch.setattr(
+            cli, "_start_server",
+            lambda h, p, s, base_path="", token=None: (fake_server, p),
+        )
+        monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "find_running", lambda: None)
+
+        parser = cli._build_parser()
+        rc = cli._run_view(parser.parse_args(
+            ["view", "--no-browser", "--map", str(jsonl_path)]))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "?source=quickstart&view=map&open=latest" in out

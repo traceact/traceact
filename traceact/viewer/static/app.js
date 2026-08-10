@@ -30,6 +30,17 @@ const API_BASE = (typeof window !== "undefined" && window.__TRACEACT_BASE__) || 
 const API_TOKEN = (typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("token")) || "";
 
+/* `?view=map` and `?open=latest` are set by `traceact view SOURCE --map`
+ * (see viewer/instance.py's _viewer_url()) so a single CLI command can land
+ * a fresh browser tab straight on the trace map instead of the log. `view`
+ * forces the initial tab; `open` auto-selects the newest trace once the
+ * first one arrives so the map has something to render. Both are read once
+ * at load — normal viewer usage (no params) is unaffected. */
+const VIEW_PARAM = (typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("view")) || "";
+let autoOpenPending = (typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("open") === "latest");
+
 function api(path) {
   let url = API_BASE + path;
   if (API_TOKEN) {
@@ -79,6 +90,8 @@ function init() {
   wireCopyButtons(document);  // the header's static copy button
   loadVersion();
   initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
+
+  if (VIEW_PARAM === "map") setTab("map");
 
   refreshSources().then(() => {
     if (state.sources.length === 0) {
@@ -238,6 +251,7 @@ function openStream(name) {
       if (!state.queryActive) {
         state.traces = msg.traces.slice(0, state.settings.limit);
       }
+      maybeAutoOpenLatest();
     } else if (msg.kind === "append") {
       // New traces arrive oldest-first; prepend so newest ends up on top.
       // An arrival whose trace_id is already displayed supersedes that row
@@ -260,11 +274,25 @@ function openStream(name) {
       if (state.traces.length > state.settings.limit) {
         state.traces.length = state.settings.limit;
       }
+      maybeAutoOpenLatest();
     }
     scheduleRender();
   };
 
   // On error EventSource auto-reconnects; nothing to do here.
+}
+
+/* Consumes autoOpenPending (?open=latest) the first time a trace is
+ * available on the freshly attached source, selecting the newest one. If
+ * ?view=map was also requested, re-forces the map tab afterward: selectTrace()
+ * opens the log/map tab from the user's saved "default trace view" setting,
+ * which would otherwise silently override a deep link built to land on the
+ * map regardless of that preference. */
+function maybeAutoOpenLatest() {
+  if (!autoOpenPending || state.traces.length === 0) return;
+  autoOpenPending = false;
+  selectTrace(state.traces[0]);
+  if (VIEW_PARAM === "map") setTab("map");
 }
 
 /* Batch renders so a burst of appends doesn't thrash the DOM. */

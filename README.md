@@ -65,6 +65,8 @@ traceact view data/traces.jsonl
 
 This starts a server at `http://127.0.0.1:8765` and opens your browser. The viewer tails the file live: traces appear as your app writes them.
 
+Add `--map` to land straight on the animated trace map for the newest trace instead of the log — see [USAGE.md's Quickstart](https://github.com/traceact/traceact/blob/main/USAGE.md#quickstart) for a full copy-paste example.
+
 ### Source types
 
 | What you pass | What happens |
@@ -89,6 +91,7 @@ traceact show [SOURCE] ...   # identical alias of view
 | `--new` | off | Force a fresh instance even if one is already running |
 | `--base-path PATH` | *(none)* | Mount at a subpath for reverse-proxy deployments |
 | `--require-token` | off | Require a random token on every API request — keeps other OS users on a shared machine out |
+| `--map` | off | Open straight onto the trace map for SOURCE's newest trace, instead of the log |
 
 ### Port selection
 
