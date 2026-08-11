@@ -20,7 +20,7 @@
 # "url", or "path" aren't accepted — the grammar stays consistent across all
 # kinds so that traces are uniform regardless of the operation type.
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 
 class TraceHelpersMixin:
@@ -35,6 +35,14 @@ class TraceHelpersMixin:
     through to trace.event(). This means any field defined in the event schema
     (rows, status, duration_ms, result, etc.) can be provided.
     """
+
+    if TYPE_CHECKING:
+        # Declares the method this mixin depends on ActionTrace providing.
+        # Type-check-only: never executed, so it can't shadow the real
+        # ActionTrace.event() at runtime, and a standalone use of this mixin
+        # still fails loudly with a real AttributeError instead of a no-op.
+        def event(self, kind: str, operation: Any = None, target: Any = None,
+                  **kwargs: Any) -> None: ...
 
     def db(self, operation: str, target: str, **kwargs: Any) -> None:
         """

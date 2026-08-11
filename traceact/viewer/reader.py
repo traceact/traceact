@@ -135,7 +135,7 @@ class SourceReader:
         # inode lets us detect replacement (not just truncation) reliably.
         # st_ino is 0 on Windows (inodes unavailable); the check is a safe no-op
         # there and falls back to the existing truncation-only detection.
-        self._inodes: Dict[str, int] = {}
+        self._inodes: Dict[str, Optional[int]] = {}
 
     # -- initial load ------------------------------------------------------
 

@@ -39,7 +39,7 @@
 #   ASGI has no equivalent problem: `await app(scope, receive, send)` only
 #   returns once the full response, streamed chunks included, has been sent.
 
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional, Protocol, Sized
 
 from traceact.propagation import (
     HEADER_CORRELATION_ID,
@@ -118,6 +118,13 @@ class _ContextClosingIterable:
             _reset_context(self._tokens)
 
 
+class _SizedIterableBytes(Iterable[bytes], Sized, Protocol):
+    """The shape _ContextClosingIterableWithLen actually requires: an
+    iterable of bytes that also supports len(). Only used for typing — the
+    runtime guarantee comes from the hasattr(result, "__len__") check at the
+    single call site that constructs this class (see wsgi_app_wrapper)."""
+
+
 class _ContextClosingIterableWithLen(_ContextClosingIterable):
     """
     Variant used when the wrapped body supports len().
@@ -132,6 +139,10 @@ class _ContextClosingIterableWithLen(_ContextClosingIterable):
     """
 
     __slots__ = ()
+    _inner: _SizedIterableBytes
+
+    def __init__(self, inner: _SizedIterableBytes, tokens: List[Any]) -> None:
+        super().__init__(inner, tokens)
 
     def __len__(self) -> int:
         return len(self._inner)

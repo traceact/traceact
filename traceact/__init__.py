@@ -77,7 +77,7 @@
 #   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
 #                   above for async frameworks.
 
-__version__ = "0.14.2"
+__version__ = "0.14.3"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget

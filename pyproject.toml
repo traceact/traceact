@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traceact"
-version = "0.14.2"
+version = "0.14.3"
 description = "X-ray vision for your code. Lightweight action-level tracing for Python."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,6 +67,11 @@ dev = [
     # thread has its own empty ContextVar context, so trace linkage in the
     # test can only come from the payload.
     "celery>=5.3",
+    # Type-checks the package itself in CI (see .github/workflows/ci.yml).
+    # traceact ships a py.typed marker, so downstream strict-mypy consumers
+    # inherit whatever these annotations claim — nothing catches drift
+    # between an annotation and actual runtime behaviour without this.
+    "mypy>=1.10",
 ]
 
 [project.urls]

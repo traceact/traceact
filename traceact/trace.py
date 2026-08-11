@@ -618,8 +618,8 @@ class _NoOpTrace:
     def __enter__(self) -> "_NoOpTrace":
         return self
 
-    def __exit__(self, *args: Any) -> bool:
-        return False  # do not suppress exceptions
+    def __exit__(self, *args: Any) -> None:
+        pass  # do not suppress exceptions
 
     # All public ActionTrace methods are present as no-ops.
     def step(self, *args: Any, **kwargs: Any) -> None: pass
@@ -888,12 +888,12 @@ class ActionTrace(TraceHelpersMixin):
         exc_type: Any,
         exc_val: Any,
         exc_tb: Any,
-    ) -> bool:
+    ) -> None:
         """
         Exit the trace context. Finishes the trace (success or failure) and
         restores the ContextVar to its previous value.
 
-        Returns False so exceptions are never suppressed.
+        Returns None (falsy) so exceptions are never suppressed.
         """
         if exc_type is not None:
             # An exception escaped the with-block — the trace failed.
@@ -905,8 +905,6 @@ class ActionTrace(TraceHelpersMixin):
         if self._context_token is not None:
             pop_trace(self._context_token)
             self._context_token = None
-
-        return False  # do not suppress the exception
 
     # ------------------------------------------------------------------
     # Public recording methods
@@ -1762,13 +1760,12 @@ class _SkippedTrace(_NoOpTrace):
         self._context_token = push_trace(SKIP)
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if exc_type is not None:
             self._promote_failure(exc_val)
         if self._context_token is not None:
             pop_trace(self._context_token)
             self._context_token = None
-        return False  # never suppress the exception
 
 
 # ---------------------------------------------------------------------------

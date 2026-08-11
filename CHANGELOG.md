@@ -2,6 +2,17 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.14.3] — 2026-08-11
+
+### Added
+
+- **README gained the same `--map` quickstart demo as USAGE.md's Quickstart** — a copy-paste script and one-line command, so a GitHub README reader gets the same one-paste-to-map path without following a link out.
+- **CI now runs on every push and pull request** (`.github/workflows/ci.yml`): `pytest` across Python 3.10/3.11/3.12, and a `mypy` type-check job. Neither existed before this release — the only prior workflows were CLA signing and the PyPI publish step, so nothing verified a change before it shipped.
+
+### Fixed
+
+- **13 real type errors**, caught by mypy's first run against the package. All were annotation/signature mismatches with no effect on runtime behaviour (verified: full suite green before and after, on two random test orderings): a mixin (`TraceHelpersMixin`) calling a method its host class provides but never declared; a dict typed `Dict[str, int]` that actually holds `Optional[int]`; four `__exit__` methods typed `-> bool` while always returning `False` (equivalent to `-> None`, which mypy requires the signature to say); and a WSGI body wrapper typed `Iterable[bytes]` where its `__len__` requires `Sized` too. Matters beyond CI cleanliness: traceact ships a `py.typed` marker (since 0.14.1), so a downstream strict-mypy consumer inherited every one of these errors on `pip install traceact` — annotations were never checked against actual behaviour before this.
+
 ## [0.14.2] — 2026-08-11
 
 ### Added

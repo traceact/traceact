@@ -294,14 +294,13 @@ class propagate:
             self._corr_token = _INCOMING_CORRELATION_ID.set(self._correlation_id)
         return self
 
-    def __exit__(self, *args: object) -> bool:
+    def __exit__(self, *args: object) -> None:
         if self._trace_token is not None:
             _INCOMING_TRACE_ID.reset(self._trace_token)
             self._trace_token = None
         if self._corr_token is not None:
             _INCOMING_CORRELATION_ID.reset(self._corr_token)
             self._corr_token = None
-        return False
 
     @property
     def incoming_trace_id(self) -> Optional[str]:
