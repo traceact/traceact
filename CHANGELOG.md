@@ -2,6 +2,12 @@
 
 All notable changes to TraceAct are documented here.
 
+## [0.14.4] — 2026-08-11
+
+### Fixed
+
+- **The viewer's live tail could silently miss traces after a source file was deleted and recreated at the same path, on Linux.** `SourceReader` detected replacement by comparing inode numbers, but Linux routinely hands a just-freed inode number straight back to the very next file created at the same path — the exact pattern a fast delete+recreate produces. When that happened, the inode check reported "unchanged" for a genuinely different file, and `poll()` seeked into the new file at the old, now-meaningless byte offset, silently dropping everything before that point. Caught by the new CI (0.14.3) on its first Linux run, not reproducible locally on macOS/APFS, where inode reuse this immediate is rare. Fixed by adding a first-bytes fingerprint alongside the inode check: an append-only writer never rewrites bytes already on disk, so the file's opening bytes are stable for as long as it's the same logical file, and any difference there is unambiguous replacement — independent of what the inode number does.
+
 ## [0.14.3] — 2026-08-11
 
 ### Added

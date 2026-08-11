@@ -81,6 +81,46 @@ def test_poll_detects_delete_and_recreate_and_rebuilds_full_snapshot(tmp_path):
     assert ids == {f"trc_{i}" for i in range(3, 20)}
 
 
+def test_poll_detects_delete_and_recreate_even_when_the_inode_is_reused(
+    tmp_path, monkeypatch,
+):
+    # Linux (observed in CI, not reproducible locally on macOS/APFS) can hand
+    # a just-freed inode number straight back to the very next file created
+    # at the same path — the exact pattern this test drives. When that
+    # happens, inode comparison alone reports "unchanged" for a genuinely
+    # different file, and poll() falls through to the stale-offset bug the
+    # inode check exists to prevent. Forcing the collision here (rather than
+    # hoping the OS reproduces it) makes the fingerprint fallback verifiable
+    # on any platform.
+    import traceact.viewer.reader as reader_module
+
+    # Simulate inode reuse: every call reports the same number, regardless
+    # of which physical file is actually at the path. Patched before the
+    # first read too, or the pre-patch real inode and the patched 999 would
+    # simply differ from each other and the (already-correct) inode check
+    # alone would catch the replacement — telling us nothing about whether
+    # the fingerprint fallback actually did the catching.
+    monkeypatch.setattr(reader_module, "_file_inode", lambda filepath: 999)
+
+    path = tmp_path / "traces.jsonl"
+    path.write_text(_trace_line(1) + "\n" + _trace_line(2) + "\n")
+
+    reader = SourceReader(str(path))
+    reader.snapshot(limit=100)
+
+    os.remove(path)
+    with open(path, "w", encoding="utf-8") as f:
+        for i in range(3, 20):
+            f.write(_trace_line(i) + "\n")
+
+    result = reader.poll(limit=100)
+
+    assert result["kind"] == "snapshot"
+    assert len(result["traces"]) == 17
+    ids = {t["trace_id"] for t in result["traces"]}
+    assert ids == {f"trc_{i}" for i in range(3, 20)}
+
+
 def test_poll_handles_truncation_without_inode_change(tmp_path):
     # A file shrinking in place (not deleted/recreated, e.g. an app truncating
     # and rewriting the same inode) is a distinct case from replacement and

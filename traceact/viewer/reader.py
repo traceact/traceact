@@ -136,6 +136,11 @@ class SourceReader:
         # st_ino is 0 on Windows (inodes unavailable); the check is a safe no-op
         # there and falls back to the existing truncation-only detection.
         self._inodes: Dict[str, Optional[int]] = {}
+        # Per-file first-bytes fingerprint — see _file_fingerprint(). Inode
+        # reuse (routine on Linux for a fast delete+recreate at the same
+        # path) can leave _inodes reporting "unchanged" for a genuinely
+        # different file; this catches that.
+        self._fingerprints: Dict[str, Optional[bytes]] = {}
 
     # -- initial load ------------------------------------------------------
 
@@ -168,6 +173,7 @@ class SourceReader:
                     # Record which physical file we just read, so poll() can
                     # tell a delete+recreate apart from a plain append.
                     self._inodes[filepath] = _file_inode(filepath)
+                    self._fingerprints[filepath] = _file_fingerprint(filepath)
             except OSError:
                 # A file that vanished or can't be opened is simply skipped.
                 continue
@@ -193,7 +199,11 @@ class SourceReader:
             though the new file may be larger than the old offset, so a
             size-only check can't detect it: it would silently seek into the
             middle of unrelated new content and drop everything before that
-            byte position. Detected here by comparing `st_ino` across calls.
+            byte position. Detected primarily by comparing `st_ino` across
+            calls, with a first-bytes fingerprint as a second signal — Linux
+            routinely hands a just-freed inode number straight back to the
+            next file created at the same path, which fools inode comparison
+            alone (see _file_fingerprint()).
 
         On a plain append, returns {"kind": "append", "traces": [...]}
         (newest-last, arrival order — the caller prepends these to the top of
@@ -214,6 +224,13 @@ class SourceReader:
             if prior_inode is not None and inode is not None and inode != prior_inode:
                 replaced = True
             self._inodes[filepath] = inode
+
+            fingerprint = _file_fingerprint(filepath)
+            prior_fingerprint = self._fingerprints.get(filepath)
+            if (prior_fingerprint is not None and fingerprint is not None
+                    and fingerprint != prior_fingerprint):
+                replaced = True
+            self._fingerprints[filepath] = fingerprint
 
             size = _file_size(filepath)
             offset = self._offsets.get(filepath, 0)
@@ -393,6 +410,30 @@ def _file_inode(filepath: str) -> Optional[int]:
     except OSError:
         return None
     return ino or None
+
+
+_FINGERPRINT_BYTES = 64
+
+
+def _file_fingerprint(filepath: str) -> Optional[bytes]:
+    """
+    The first bytes of a file, or None if it can't be read.
+
+    A second, inode-independent signal for delete+recreate detection. Linux
+    routinely hands the just-freed inode number straight back to the very
+    next file created at the same path — observed in CI (Linux runners) but
+    not locally (macOS/APFS), where inode reuse this immediate is rare. When
+    that happens, _file_inode() alone reports "unchanged" for a genuinely
+    different file. An append-only writer never rewrites bytes already on
+    disk, so the file's opening bytes are stable for as long as the same
+    logical file exists; any difference here is unambiguous replacement,
+    independent of what the inode number does.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            return f.read(_FINGERPRINT_BYTES)
+    except OSError:
+        return None
 
 
 def _started_at_key(trace: Dict[str, Any]) -> str:
