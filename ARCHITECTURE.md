@@ -65,7 +65,7 @@ flowchart LR
 
     subgraph server ["ViewerServer (stdlib ThreadingHTTPServer)"]
         gate["Token gate (opt-in)<br/>every /api/* route"]
-        routes["Routes<br/>/ static · /api/health · /api/sources ·<br/>/api/stream SSE · /api/query · /api/export ·<br/>/api/doctor · /api/pick · /api/import"]
+        routes["Routes<br/>/ static · /api/health · /api/sources ·<br/>/api/stream SSE · /api/query · /api/export ·<br/>/api/doctor · /api/pick · /api/import · /api/focus"]
         state["ViewerState<br/>registered sources, names"]
         reader["SourceReader<br/>snapshot + byte-offset tail,<br/>inode change detection, in-flight dedupe"]
     end
@@ -103,6 +103,17 @@ Coordination contracts:
   `open` auto-selects the newest trace the moment it arrives over the live
   stream, once, so it never fights a later manual selection. Without the
   flag both params are absent and behaviour is unchanged.
+- **Focus hook**: `traceact view SOURCE --focus-hook URL` fixes a hook URL
+  at server start (validated http(s), advertised as a boolean in
+  `/api/health`, printed at startup). The page renders Focus controls only
+  when the boolean is true; a click POSTs the full record to the server's
+  own `POST /api/focus`, which forwards it to the hook URL — server-side,
+  so a hook consumer needs no CORS handling and the URL never reaches the
+  page. Non-2xx or no answer within ~1s comes back as `502` and surfaces
+  as a brief notice; the forward runs on the request's own thread, so a
+  slow hook delays only its own click. Unknown record fields pass through
+  the whole chain (file → reader → SSE → page → hook) untouched — hook
+  consumers depend on fields traceact doesn't define.
 
 ## Component contracts
 

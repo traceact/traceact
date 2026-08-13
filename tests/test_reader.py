@@ -147,3 +147,42 @@ def test_folder_source_merges_multiple_files(tmp_path):
     traces = reader.snapshot(limit=100)
 
     assert {t["trace_id"] for t in traces} == {"trc_1", "trc_2"}
+
+
+def _trace_with_extras(i: int) -> dict:
+    # A record carrying fields traceact itself has never defined. A browser
+    # tracing producer depends on these surviving snapshot and poll untouched
+    # (the viewer's focus hook POSTs the record back out with them).
+    return {
+        "trace_id": f"trc_{i}", "action": "a",
+        "started_at": f"2026-01-01T00:00:{i:02d}Z",
+        "browser_label": "work-brave",
+        "tab_id": 4711,
+        "window_id": 2,
+        "page_load_id": "pl_9c2f",
+        "client_meta": {"viewport": [1440, 900]},
+    }
+
+
+def test_snapshot_carries_unknown_extra_fields_through(tmp_path):
+    record = _trace_with_extras(1)
+    path = tmp_path / "traces.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+
+    traces = SourceReader(str(path)).snapshot(limit=100)
+
+    assert traces == [record]
+
+
+def test_poll_carries_unknown_extra_fields_through(tmp_path):
+    path = tmp_path / "traces.jsonl"
+    path.write_text(_trace_line(1) + "\n")
+    reader = SourceReader(str(path))
+    reader.snapshot(limit=100)
+
+    record = _trace_with_extras(2)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+    result = reader.poll(limit=100)
+    assert result["traces"] == [record]

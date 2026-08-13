@@ -1480,8 +1480,31 @@ The viewer reads any line that parses as JSON and looks like a trace; malformed 
 | `--base-path PATH` | *(none)* | Mount the viewer at a subpath (e.g. `/audit-viewer`) for reverse-proxy deployments. |
 | `--require-token` | off | Require a random token on every API request. See [Token auth](#token-auth). |
 | `--map` | off | Open straight onto the Trace map for SOURCE's newest trace, instead of the log. No effect without SOURCE. See [Quickstart](#quickstart). |
+| `--focus-hook URL` | *(none)* | Show a Focus control on every trace; clicking it POSTs the full trace record to URL. See [Focus hook](#focus-hook). |
 
 You can also run it as a module: `python -m traceact.viewer.cli view SOURCE`.
+
+### Focus hook
+
+`--focus-hook URL` connects the viewer to whatever produced the traces. With it set, every row in the trace log (and the trace map's toolbar) gets a **Focus** button; clicking one POSTs that trace's **full record** as JSON to `URL`. The receiving end decides what "focus" means — a browser-extension relay fronts the tab that produced the trace, an editor plugin jumps to the source line, anything that can act on the record's fields.
+
+```bash
+traceact view browser_traces.jsonl --focus-hook http://127.0.0.1:8899/focus
+```
+
+```
+TraceAct viewer running at http://127.0.0.1:8765/?source=browser_traces
+Focus hook: http://127.0.0.1:8899/focus
+Press Ctrl+C to stop.
+```
+
+- **The whole record is sent, not selected fields.** A hook consumer usually relies on fields traceact itself doesn't define (a tab id, a window id, a page-load id); the viewer carries every field of a record through untouched, from file to hook.
+- Any `http://` or `https://` URL is accepted. Passing the flag is your consent to send trace records — including captured inputs and outputs — to that URL, and the destination is printed at startup so it's always visible. Point it at a remote URL only if you mean records to leave the machine.
+- The hook answers `2xx` for success. Anything else, a refused connection, or no answer within about a second shows a brief "Focus hook didn't respond" notice in the viewer. The viewer itself never blocks on the hook.
+- The hook is fixed when the server starts, like `--require-token` and `--base-path`. Asking for one while reusing a running viewer prints a notice; stop and relaunch to change it.
+- From an embedding app, pass `focus_hook=` to `launch_or_connect()` — it forwards the flag to the viewer it spawns.
+
+The wire contract for a hook consumer: accept `POST` with `Content-Type: application/json`, body = one trace record, respond `2xx`. Nothing else is required — no CORS handling, no other routes.
 
 ### Token auth
 
@@ -1592,7 +1615,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{"status":"ok","version":"0.3.0","sources":N}` |
+| `GET` | `/api/health` | — | `{"status":"ok","version":"...","sources":N,"focus_hook":bool}` |
 | `GET` | `/api/doctor?source=` | — | `{"ok":bool,"version":"...","checks":[{"label","status","message","hint"?}]}` |
 | `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
 | `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |
@@ -1601,6 +1624,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
 | `GET` | `/api/query?source=NAME&field[__op]=value&limit=N` | — | `{"traces":[...],"scan_capped":bool,"limit_reached":bool,"count":N}` |
 | `GET` | `/api/export?source=NAME` | — | `.jsonl` file download (`application/x-ndjson`) |
+| `POST` | `/api/focus` | one trace record (JSON object) | `{"ok":true}`, or `502 {"ok":false,"error":"..."}` when the hook failed; `404` on a server started without `--focus-hook` |
 
 `/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path can't be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
 
@@ -1680,6 +1704,7 @@ launch_or_connect(
     name=None,        # label for this source in the picker; derived from the path if unset
     base_path="",     # subpath to mount under, e.g. "/audit-viewer" (default: root)
     require_token=False,  # start the viewer with token auth (see Token auth)
+    focus_hook=None,  # http(s) URL to POST records to on Focus clicks (see Focus hook)
 ) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/?source=agora"
 ```
 

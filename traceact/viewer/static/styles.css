@@ -368,6 +368,39 @@ body {
 .col-action { color: var(--text); font-weight: 500; }
 .col-meta { color: var(--text-faint); font-size: 11px; }
 
+/* Focus column: width collapses to its content, so with no hook configured
+   (empty cells, unlabelled header) the column effectively disappears. */
+.col-focus { width: 1%; text-align: right; }
+
+.focus-btn {
+  font: inherit;
+  font-size: 11px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.focus-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--bg-hover); }
+.focus-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Non-blocking notice for a hook that failed to answer. Fixed to a corner so
+   it overlays nothing interactive, and hidden again on a timer. */
+.focus-notice {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+}
+
 .empty-state {
   color: var(--text-faint);
   text-align: center;

@@ -165,6 +165,7 @@ def launch_or_connect(
     name: Optional[str] = None,
     base_path: str = "",
     require_token: bool = False,
+    focus_hook: Optional[str] = None,
 ) -> str:
     """
     Ensure a viewer is running and return its URL.  Designed to be called from
@@ -227,6 +228,14 @@ def launch_or_connect(
     port, are shut out. Like ``base_path``, this only takes effect on the
     launch that actually spawns a server: a viewer already running is reused
     with whatever token setting it started with, tokened or not.
+
+    ``focus_hook`` starts the viewer with a focus hook: every trace gets a
+    Focus control, and clicking one POSTs the full trace record as JSON to
+    this URL (see ``traceact view --focus-hook``). Must be an http(s) URL —
+    the spawned CLI validates it and refuses anything else. Like the two
+    settings above, it only takes effect on the launch that spawns a
+    server; a viewer already running keeps the hook setting (and URL) it
+    started with.
     """
     import subprocess
     import sys
@@ -258,6 +267,8 @@ def launch_or_connect(
         cmd += ["--base-path", base_path]
     if require_token:
         cmd.append("--require-token")
+    if focus_hook:
+        cmd += ["--focus-hook", focus_hook]
     if source is not None and name is None:
         cmd.append(source)
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

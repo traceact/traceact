@@ -374,7 +374,7 @@ class TestCliRequireToken:
         fake_server = mock.MagicMock()
         fake_server.serve_forever.side_effect = lambda: None
 
-        def fake_start(h, p, s, base_path="", token=None):
+        def fake_start(h, p, s, base_path="", token=None, focus_hook=None):
             captured["token"] = token
             return fake_server, p
 
@@ -430,7 +430,8 @@ class TestCliSourcePin:
         fake_server.serve_forever.side_effect = lambda: None
         monkeypatch.setattr(
             cli, "_start_server",
-            lambda h, p, s, base_path="", token=None: (fake_server, p),
+            lambda h, p, s, base_path="", token=None, focus_hook=None:
+                (fake_server, p),
         )
         monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
         monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())
@@ -488,7 +489,8 @@ class TestCliMapFlag:
         fake_server.serve_forever.side_effect = lambda: None
         monkeypatch.setattr(
             cli, "_start_server",
-            lambda h, p, s, base_path="", token=None: (fake_server, p),
+            lambda h, p, s, base_path="", token=None, focus_hook=None:
+                (fake_server, p),
         )
         monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
         monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())
@@ -577,7 +579,8 @@ class TestQuickstartDocRecipe:
         fake_server.serve_forever.side_effect = lambda: None
         monkeypatch.setattr(
             cli, "_start_server",
-            lambda h, p, s, base_path="", token=None: (fake_server, p),
+            lambda h, p, s, base_path="", token=None, focus_hook=None:
+                (fake_server, p),
         )
         monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
         monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())

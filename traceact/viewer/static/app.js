@@ -72,6 +72,10 @@ const state = {
   queryIncomplete: false,
   stream: null,           // the EventSource, or null
   replayPaused: false,    // whether the map replay is paused
+  // True when the server was started with --focus-hook (read from
+  // /api/health). Gates every Focus control; the hook URL itself never
+  // reaches the page — the server forwards records to it.
+  focusHook: false,
   settings: loadSettings(),
 };
 
@@ -87,6 +91,7 @@ function init() {
   wireReplayControls();
   wireMapZoom();
   wireDoctor();
+  wireFocus();
   wireCopyButtons(document);  // the header's static copy button
   loadVersion();
   initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
@@ -148,6 +153,10 @@ async function loadVersion() {
     if (data && data.version) {
       document.getElementById("version-badge").textContent = `v${data.version}`;
     }
+    // The same payload says whether this server forwards to a focus hook.
+    // Absent (an older server) reads as false, so no controls appear.
+    state.focusHook = !!(data && data.focus_hook);
+    applyFocusHookUI();
   } catch (e) {
     /* leave the badge empty rather than showing a wrong or stale version */
   }
@@ -329,8 +338,19 @@ function renderLog() {
       <td><span class="status status-${t.status}">${esc(t.status)}</span></td>
       <td>${fmtDurShort(t.duration_ms)}</td>
       <td class="col-meta">${countTEB(t)}</td>
+      <td class="col-focus">${state.focusHook
+        ? `<button class="focus-btn" title="Front what produced this trace, via the focus hook">Focus</button>`
+        : ""}</td>
     `;
     tr.addEventListener("click", () => selectTrace(t));
+    const focusBtn = tr.querySelector(".focus-btn");
+    if (focusBtn) {
+      focusBtn.addEventListener("click", (e) => {
+        // A row click selects the trace; focusing must not also do that.
+        e.stopPropagation();
+        sendFocus(t, focusBtn);
+      });
+    }
     body.appendChild(tr);
   }
 }
@@ -896,6 +916,67 @@ function toggleReplay() {
   } else {
     btn.textContent = "⏸ Pause";
     renderMap();  // rebuild and start the sequential replay again
+  }
+}
+
+/* ---- Focus hook ------------------------------------------------------- */
+//
+// Only rendered when the server was started with --focus-hook (advertised in
+// /api/health). Clicking Focus POSTs the full trace record to the server's
+// own /api/focus, which forwards it to the hook URL — the consumer (e.g. a
+// browser-extension relay) reads whatever fields it needs from the record to
+// front the thing that produced the trace. A hook that answers non-2xx, or
+// doesn't answer within the server's timeout, surfaces as a brief notice;
+// the viewer itself is never blocked.
+
+async function sendFocus(t, btn) {
+  if (!t) return;
+  if (btn) btn.disabled = true;
+  let failed = false;
+  try {
+    const res = await fetch(api("/api/focus"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(t),
+    });
+    failed = !res.ok;
+  } catch (e) {
+    failed = true;
+  }
+  if (btn) btn.disabled = false;
+  if (failed) showFocusNotice("Focus hook didn't respond");
+}
+
+let focusNoticeTimer = null;
+function showFocusNotice(msg) {
+  const el = document.getElementById("focus-notice");
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  if (focusNoticeTimer) clearTimeout(focusNoticeTimer);
+  focusNoticeTimer = setTimeout(() => { el.hidden = true; }, 4000);
+}
+
+/* Reveal the Focus controls once /api/health confirms a hook exists: label
+ * the log table's (otherwise empty) trailing column and unhide the map
+ * toolbar's Focus button. Re-renders the log so already-drawn rows gain
+ * their buttons too — health and the first snapshot race, either can win. */
+function applyFocusHookUI() {
+  if (!state.focusHook) return;
+  const th = document.getElementById("th-focus");
+  if (th) {
+    th.textContent = "FOCUS";
+    th.title = "Send a trace to the focus hook";
+  }
+  const mapBtn = document.getElementById("map-focus");
+  if (mapBtn) mapBtn.hidden = false;
+  scheduleRender();
+}
+
+function wireFocus() {
+  const mapBtn = document.getElementById("map-focus");
+  if (mapBtn) {
+    mapBtn.addEventListener("click", () => sendFocus(state.selected, mapBtn));
   }
 }
 

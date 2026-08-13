@@ -78,6 +78,9 @@
                   <th title="completed, failed, running, or cancelled">STATUS</th>
                   <th title="How long the action took">DUR.</th>
                   <th title="Touches · Errors · Budget — resources touched, errors recorded, and whether a recording limit was hit (Y) or not (—)">T·E·B</th>
+                  <!-- Labelled by app.js only when the server has a focus
+                       hook; stays an empty column otherwise. -->
+                  <th class="col-focus" id="th-focus"></th>
                 </tr>
               </thead>
               <tbody id="log-body"></tbody>
@@ -92,6 +95,8 @@
             <div class="map-toolbar">
               <span class="map-caption" id="map-caption">SELECT A TRACE</span>
               <div class="replay-controls">
+                <button class="replay-btn" id="map-focus" hidden
+                        title="Front what produced this trace, via the focus hook">Focus</button>
                 <div class="zoom-controls">
                   <button class="zoom-btn" id="zoom-in"  title="Zoom in">+</button>
                   <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
@@ -190,6 +195,9 @@
       </div>
     </main>
   </div>
+
+  <!-- Focus-hook notice: non-blocking, shown briefly when the hook fails -->
+  <div class="focus-notice" id="focus-notice" hidden></div>
 
   <!-- Add-source modal -->
   <div class="modal-backdrop" id="source-modal" hidden>

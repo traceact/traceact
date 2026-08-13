@@ -23,6 +23,8 @@
 #   --host HOST     interface to bind (default 127.0.0.1, localhost only)
 #   --no-browser    start the server but don't open a browser tab
 #   --map           open straight onto the map for SOURCE's newest trace
+#   --focus-hook URL  show a Focus control on every trace; clicking it POSTs
+#                   the full record to URL (see _serve_focus in server.py)
 
 import argparse
 import secrets
@@ -32,7 +34,12 @@ import webbrowser
 from typing import Optional
 
 from traceact.viewer import doctor as _doctor
-from traceact.viewer.server import ViewerServer, ViewerState, _normalise_base_path
+from traceact.viewer.server import (
+    ViewerServer,
+    ViewerState,
+    _normalise_base_path,
+    _validate_focus_hook,
+)
 import traceact.viewer.instance as _instance
 
 _DEFAULT_PORT = 8765
@@ -106,6 +113,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "SOURCE (there's nothing to select onto).",
     )
     view.add_argument(
+        "--focus-hook", default=None, metavar="URL",
+        help="Show a Focus control on every trace; clicking it POSTs the "
+             "full trace record as JSON to URL. Any http(s) URL is accepted "
+             "— passing this flag is your consent to send records there, "
+             "and the destination is printed at startup. A hook that "
+             "doesn't answer 2xx within a second shows a notice in the "
+             "viewer and never blocks it.",
+    )
+    view.add_argument(
         "--require-token", action="store_true",
         help="Require a random token on every API request (printed as part "
              "of the URL). Keeps other OS users on a shared machine out of "
@@ -160,6 +176,14 @@ def _run_view(args: argparse.Namespace) -> int:
     # agree on one spelling of the prefix.
     base_path = _normalise_base_path(getattr(args, "base_path", ""))
 
+    # Validated before anything starts, so a mistyped URL fails here with a
+    # clear message instead of surfacing on the first Focus click.
+    try:
+        focus_hook = _validate_focus_hook(getattr(args, "focus_hook", None))
+    except ValueError as exc:
+        print(f"traceact view: {exc}", file=sys.stderr)
+        return 2
+
     if not args.new and not user_chose_port:
         existing = _instance.find_running()
         if existing is not None:
@@ -176,6 +200,23 @@ def _run_view(args: argparse.Namespace) -> int:
                     "Stop it and relaunch to turn token auth on.",
                     file=sys.stderr,
                 )
+            if focus_hook:
+                # A server's hook is fixed when it starts, like its token and
+                # base path — a running instance can't gain one, and one it
+                # already has keeps the URL it started with.
+                if existing["health"].get("focus_hook"):
+                    print(
+                        "Note: the running viewer keeps the focus hook it "
+                        "was started with; the URL passed here is ignored.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "Note: reusing a viewer that was started without "
+                        "--focus-hook; Focus controls won't appear. Stop it "
+                        "and relaunch with the flag to enable the hook.",
+                        file=sys.stderr,
+                    )
             source_name = None
             if args.source is not None:
                 added = _instance.add_source_to(host, port, args.source,
@@ -214,7 +255,8 @@ def _run_view(args: argparse.Namespace) -> int:
     token = secrets.token_urlsafe(24) if args.require_token else None
 
     server, port = _start_server(args.host, args.port, state,
-                                 base_path=base_path, token=token)
+                                 base_path=base_path, token=token,
+                                 focus_hook=focus_hook)
     if server is None:
         print(
             f"Could not bind a port near {args.port}. "
@@ -230,6 +272,10 @@ def _run_view(args: argparse.Namespace) -> int:
     if token:
         print("Token auth is on: API requests need the token from the URL "
               "above (?token= or an X-TraceAct-Token header).")
+    if focus_hook:
+        # The destination is always visible: every Focus click sends the
+        # full trace record here.
+        print(f"Focus hook: {focus_hook}")
     print("Press Ctrl+C to stop.")
 
     # Only a default-port instance advertises itself as the shared viewer.
@@ -340,7 +386,8 @@ def _run_scan(source: str) -> int:
 
 
 def _start_server(host: str, port: int, state: ViewerState,
-                  base_path: str = "", token: Optional[str] = None):
+                  base_path: str = "", token: Optional[str] = None,
+                  focus_hook: Optional[str] = None):
     """
     Try to bind the requested port, incrementing a few times if it's in use.
     Returns (server, actual_port) or (None, port) if no nearby port was free.
@@ -348,7 +395,8 @@ def _start_server(host: str, port: int, state: ViewerState,
     for candidate in range(port, port + 20):
         try:
             server = ViewerServer(host, candidate, state,
-                                  base_path=base_path, token=token)
+                                  base_path=base_path, token=token,
+                                  focus_hook=focus_hook)
             return server, candidate
         except OSError:
             # Port in use; try the next one.

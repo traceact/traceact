@@ -2,6 +2,19 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.0.0] — 2026-08-13
+
+### Added
+
+- **Focus hook: click a trace in the viewer, and whatever produced it can act on it.** `traceact view SOURCE --focus-hook URL` puts a **Focus** button on every trace row and in the trace map's toolbar; clicking one POSTs that trace's full record as JSON to `URL`. The receiving end decides what "focus" means — a browser-extension relay fronting the tab that produced the trace, an editor jumping to a source line, anything that can act on the record's fields. The whole record travels, so a consumer's own fields (a tab id, a window id, a page-load id) arrive without the viewer knowing they exist. Any http(s) URL is accepted; passing the flag is consent to send records there, and the destination prints at startup. A hook that answers non-2xx or doesn't answer within about a second shows a brief notice and never blocks the viewer. See [Focus hook](https://github.com/traceact/traceact/blob/main/USAGE.md#focus-hook) in USAGE.md.
+- **`launch_or_connect(focus_hook=...)`** — embedding apps can pass the same URL; it's forwarded to the viewer the call spawns. Like `base_path` and `require_token`, it only takes effect on the launch that starts a server.
+- **`/api/health` now reports `"focus_hook": true/false`**, so clients know whether Focus controls apply without the hook URL itself ever leaving the server.
+- **Tests pinning unknown-field passthrough.** Records carrying fields traceact doesn't define survive `SourceReader.snapshot()`, `poll()`, the SSE stream, and the focus-hook forward untouched. This has always been the behaviour; it's now under test because hook consumers depend on it.
+
+### Changed
+
+- **Version 1.0.0.** The public API — recording (`@traced_action`, `ActionTrace`), configuration, sinks, `TraceLog`, propagation, middleware, the viewer, and the `traceact` CLI — is stable. Semver applies as before: breaking changes only with a major bump.
+
 ## [0.14.4] — 2026-08-11
 
 ### Fixed

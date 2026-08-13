@@ -120,6 +120,7 @@ traceact show [SOURCE] ...   # identical alias of view
 | `--base-path PATH` | *(none)* | Mount at a subpath for reverse-proxy deployments |
 | `--require-token` | off | Require a random token on every API request — keeps other OS users on a shared machine out |
 | `--map` | off | Open straight onto the trace map for SOURCE's newest trace, instead of the log |
+| `--focus-hook URL` | *(none)* | Show a Focus control on every trace; clicking it POSTs the full trace record to URL |
 
 ### Port selection
 

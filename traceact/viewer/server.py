@@ -16,6 +16,8 @@
 #   GET  /api/query?source=&<field>[__op]=&limit=   search the full source via
 #        TraceLog, not just the live-tailed buffer (see _serve_query)
 #   GET  /api/export?source=<name>    the whole source as a .jsonl download
+#   POST /api/focus                   forward a trace record to the focus hook
+#        (only on a server started with one — see _serve_focus)
 #
 # Serving under a path prefix:
 # Every route above is relative to the server's base path, which is "" (the
@@ -62,6 +64,8 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -128,6 +132,33 @@ _EXPORT_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 # its API calls with. Declared only when a base path is configured; app.js
 # treats its absence as "serve from root", which is the default.
 _BASE_PATH_GLOBAL = "__TRACEACT_BASE__"
+
+# /api/focus — how long a forward to the focus hook may take before it's
+# reported as a failure. Short on purpose: the hook is expected to be a local
+# relay, and the viewer must never feel blocked on it. Each request runs on
+# its own thread (ThreadingHTTPServer), so even a slow hook only ever delays
+# its own click, not the stream or any other request.
+_FOCUS_HOOK_TIMEOUT_SECONDS = 1.0
+
+
+def _validate_focus_hook(url: Optional[str]) -> Optional[str]:
+    """
+    Return `url` when it parses as an http(s) URL with a host, None when it's
+    empty, and raise ValueError otherwise.
+
+    Only the scheme and host presence are checked — any http(s) destination
+    is accepted. Passing the flag at all is the user's consent to POST trace
+    records there, and the CLI prints the destination at startup so it is
+    always visible.
+    """
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"focus hook must be an http:// or https:// URL, got {url!r}"
+        )
+    return url
 
 
 def _normalise_base_path(base_path: Optional[str]) -> str:
@@ -318,6 +349,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._add_source()
         elif route == "/api/import":
             self._import_file()
+        elif route == "/api/focus":
+            self._serve_focus()
         else:
             self._send_error(404, "Not found")
 
@@ -478,7 +511,66 @@ class _Handler(BaseHTTPRequestHandler):
             "status": "ok",
             "version": __version__,
             "sources": len(self.server.state.sources),  # type: ignore[attr-defined]
+            # Whether this server forwards to a focus hook. The front-end
+            # reads this to decide whether to render Focus controls at all;
+            # the hook URL itself stays server-side.
+            "focus_hook": bool(getattr(self.server, "focus_hook", None)),
         })
+
+    # -- focus hook ----------------------------------------------------------
+
+    def _serve_focus(self) -> None:
+        """
+        Forward one trace record to the configured focus hook.
+
+        The browser POSTs the record here rather than to the hook directly:
+        a cross-origin POST from the page would need the hook to answer CORS
+        preflights, which would silently become a requirement on every hook
+        consumer. Forwarding server-side keeps the hook a plain HTTP endpoint
+        and keeps its URL out of the page.
+
+        The whole record is forwarded as received — the hook's consumer knows
+        which fields it needs (a browser tab id, a window id, a page-load id),
+        so nothing is cherry-picked or stripped here.
+
+        Responses: 200 {"ok": true} when the hook answered 2xx; 502 with an
+        error message when it answered anything else or didn't answer within
+        _FOCUS_HOOK_TIMEOUT_SECONDS. The hook can never block the viewer
+        beyond that timeout, and only on the requesting thread.
+        """
+        hook = getattr(self.server, "focus_hook", None)
+        if not hook:
+            self._send_json(404, {"error": "no focus hook configured — "
+                                           "start the viewer with --focus-hook URL"})
+            return
+        record = self._read_json_body()
+        if not isinstance(record, dict):
+            self._send_json(400, {"error": "expected a JSON trace record"})
+            return
+
+        body = json.dumps(record, default=str).encode("utf-8")
+        req = urllib.request.Request(hook, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Length", str(len(body)))
+        try:
+            with urllib.request.urlopen(
+                req, timeout=_FOCUS_HOOK_TIMEOUT_SECONDS
+            ) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        except Exception:
+            # Connection refused, timeout, DNS failure — the hook is down or
+            # unreachable. Reported, never raised: a dead hook must not take
+            # the viewer with it.
+            self._send_json(502, {"ok": False,
+                                  "error": "focus hook didn't respond"})
+            return
+        if 200 <= status < 300:
+            self._send_json(200, {"ok": True})
+        else:
+            self._send_json(502, {"ok": False,
+                                  "error": f"focus hook returned {status}"})
 
     # -- doctor --------------------------------------------------------------
 
@@ -699,7 +791,8 @@ class ViewerServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, host: str, port: int, state: ViewerState,
-                 base_path: str = "", token: Optional[str] = None) -> None:
+                 base_path: str = "", token: Optional[str] = None,
+                 focus_hook: Optional[str] = None) -> None:
         # Normalised once here rather than on every request, and stored so
         # _Handler can read it off the server instance.
         self.base_path = _normalise_base_path(base_path)
@@ -707,6 +800,10 @@ class ViewerServer(ThreadingHTTPServer):
         # _Handler._authorised). None — the default — leaves the server open
         # to any local caller, exactly as before tokens existed.
         self.token = token or None
+        # When set, POST /api/focus forwards trace records to this URL (see
+        # _serve_focus). Validated here so a bad URL fails at construction,
+        # loudly, rather than on the first click.
+        self.focus_hook = _validate_focus_hook(focus_hook)
         super().__init__((host, port), _Handler)
         self.state = state
 
