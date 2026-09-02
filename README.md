@@ -199,6 +199,8 @@ Captured values are guarded twice: field-name redaction (`password`, `api_key`, 
 
 With the optional [rates](https://pypi.org/project/rates/) package installed (`pip install rates`), the viewer also prices model calls: a model event recorded with a provider and token counts — `trace.model(operation="completion", target="claude-sonnet-5", provider="anthropic", tokens_in=800, tokens_out=200)` — shows an estimated cost in the inspector, and each trace shows the sum across its calls. Estimates are computed at display time from a dated price snapshot; nothing is written into the trace records. Full detail: [USAGE.md's Cost estimates](https://github.com/traceact/traceact/blob/main/USAGE.md#cost-estimates).
 
+A traced call ending via `asyncio.CancelledError` or `KeyboardInterrupt` records with `status: "cancelled"` (exception captured, always re-raised) rather than as a failure — and a cancelled `@traced_action` coroutine is recorded at all, where it previously vanished. Failures themselves can carry caller-declared codes (`errors={TimeoutError: "timeout"}` on the decorator) and be queried by them, nested fields included: `TraceLog(...).filter(**{"errors.code": "timeout"})`. Details: [USAGE.md's Errors](https://github.com/traceact/traceact/blob/main/USAGE.md#errors).
+
 For long-running work, opt-in in-flight streaming (`TraceConfig(stream_progress=True)`) shows a `running` row that fills in as the trace progresses — and a process that crashes mid-trace leaves its last snapshot on disk as evidence instead of losing the trace entirely.
 
 ## Background jobs and queues

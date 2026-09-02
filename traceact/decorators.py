@@ -63,6 +63,8 @@ from traceact.trace import (
     _create_trace,
     _is_sensitive,
     _safe_value,
+    _status_for_ending,
+    _validate_error_codes,
 )
 
 
@@ -79,6 +81,7 @@ def traced_action(
     config: Optional[TraceConfig] = None,
     budget: Optional[TraceBudget] = None,
     correlation_id: Optional[str] = None,
+    errors: Optional[Dict[type, str]] = None,
 ) -> Any:
     """
     Decorator that traces the execution of a function.
@@ -157,6 +160,17 @@ def traced_action(
             same order). Useful for connecting traces across functions or
             services.
 
+        errors:
+            A {ExceptionType: "code"} map. When an exception ends the
+            traced call, the code of its first isinstance match (in
+            declaration order, so list subclasses before their bases) is
+            recorded on the trace's error-summary entry — making failures
+            queryable by code (TraceLog.filter(**{"errors.code": ...}))
+            instead of by stack-trace text. The map classifies what
+            happened; it never changes what is raised. Validated at
+            decoration time. Example:
+            errors={CustomerNotFound: "not_found", TimeoutError: "timeout"}.
+
     Returns:
         A decorator that wraps the target function.
 
@@ -211,17 +225,23 @@ def traced_action(
             resolved_config = copy.copy(config) if config is not None else TraceConfig()
             resolved_config.capture_inputs = capture_inputs
 
+        # Same fail-at-decoration-time treatment as the capture spec: a bad
+        # errors= map raises here, where it's written.
+        error_codes = _validate_error_codes(errors, "@traced_action")
+
         # Decide now (at decoration time, not call time) which wrapper to use.
         # This avoids an inspect.iscoroutinefunction() check on every call.
         if inspect.iscoroutinefunction(func):
             return _async_wrapper(
                 func, action, kind, actor, project, operation, target,
                 database, meta, resolved_config, budget, correlation_id,
+                error_codes,
             )
         else:
             return _sync_wrapper(
                 func, action, kind, actor, project, operation, target,
                 database, meta, resolved_config, budget, correlation_id,
+                error_codes,
             )
 
     return decorator
@@ -244,6 +264,7 @@ def _sync_wrapper(
     config: Optional[TraceConfig],
     budget: Optional[TraceBudget],
     correlation_id: Optional[str],
+    error_codes: Optional[Dict[type, str]],
 ) -> Any:
     """
     Build and return a sync wrapper for the given function.
@@ -288,6 +309,7 @@ def _sync_wrapper(
             operation=operation,
             target=target,
             database=database,
+            error_codes=error_codes,
         )
 
         # Case 1: The trace was sampled out. Push SKIP onto the ContextVar so
@@ -299,7 +321,9 @@ def _sync_wrapper(
             token = push_trace(SKIP)
             try:
                 return func(*args, **kwargs)
-            except Exception as exc:
+            except BaseException as exc:
+                # BaseException, not Exception: a cancellation or interrupt
+                # must not slip past the promotion promise either.
                 trace_or_noop._promote_failure(exc)
                 raise
             finally:
@@ -335,10 +359,13 @@ def _sync_wrapper(
             trace._finish(status="completed")
             return result
 
-        except Exception as exc:
-            # Failure path. The exception is re-raised after the trace is
-            # finished — TraceAct never suppresses exceptions.
-            trace._finish(status="failed", error=exc)
+        except BaseException as exc:
+            # Any escaping exception finishes and records the trace before
+            # being re-raised — TraceAct never suppresses exceptions, and a
+            # BaseException outside the Exception tree (a cancellation, an
+            # interrupt) must not leave the trace unwritten. The status
+            # classifies the ending: cancelled vs failed.
+            trace._finish(status=_status_for_ending(type(exc)), error=exc)
             raise
 
         finally:
@@ -365,6 +392,7 @@ def _async_wrapper(
     config: Optional[TraceConfig],
     budget: Optional[TraceBudget],
     correlation_id: Optional[str],
+    error_codes: Optional[Dict[type, str]],
 ) -> Any:
     """
     Build and return an async wrapper for the given coroutine function.
@@ -399,6 +427,7 @@ def _async_wrapper(
             operation=operation,
             target=target,
             database=database,
+            error_codes=error_codes,
         )
 
         # Sampled out — push SKIP, await, restore; promote a failure record if
@@ -408,7 +437,10 @@ def _async_wrapper(
             token = push_trace(SKIP)
             try:
                 return await func(*args, **kwargs)
-            except Exception as exc:
+            except BaseException as exc:
+                # BaseException: asyncio.CancelledError stopped deriving
+                # from Exception in Python 3.8, so an Exception-only clause
+                # would let a cancelled call skip promotion entirely.
                 trace_or_noop._promote_failure(exc)
                 raise
             finally:
@@ -431,8 +463,12 @@ def _async_wrapper(
             trace._finish(status="completed")
             return result
 
-        except Exception as exc:
-            trace._finish(status="failed", error=exc)
+        except BaseException as exc:
+            # BaseException: an Exception-only clause let a cancelled
+            # coroutine's trace vanish unwritten — asyncio.CancelledError
+            # derives from BaseException. The ending is classified
+            # (cancelled vs failed), recorded, and always re-raised.
+            trace._finish(status=_status_for_ending(type(exc)), error=exc)
             raise
 
         finally:

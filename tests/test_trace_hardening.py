@@ -220,14 +220,16 @@ class TestPromotionContextManager:
         assert sink.records == []
 
     def test_keyboard_interrupt_promoted_and_reraised(self, sink):
-        # ActionTrace.__exit__ records BaseExceptions as failures; the
+        # ActionTrace.__exit__ records every BaseException ending; the
         # suppressed path must match, not narrow the contract to Exception.
+        # An interrupt classifies as "cancelled" — the user stopped the
+        # action; nothing in it failed (see _status_for_ending).
         configure(budget=_sampled_out_budget())
         with pytest.raises(KeyboardInterrupt):
             with ActionTrace.start(action="fail.interrupt"):
                 raise KeyboardInterrupt()
         assert len(sink.records) == 1
-        assert sink.records[0]["status"] == "failed"
+        assert sink.records[0]["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-02 09:51:47 UTC
+Last updated: 2026-09-02 10:34:32 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 
@@ -9,7 +9,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | File | What it does |
 |---|---|
 | `traceact/__init__.py` | Public exports and `__version__`. Everything importable from the package root is declared here. |
-| `traceact/trace.py` | `ActionTrace`: the trace lifecycle — start/finish, steps, events, touches, inputs/outputs, errors, parent/child linking, budget enforcement, in-flight streaming snapshots. Writes to the configured sinks on finish. |
+| `traceact/trace.py` | `ActionTrace`: the trace lifecycle — start/finish, steps, events, touches, inputs/outputs, errors, parent/child linking, budget enforcement, in-flight streaming snapshots, ending classification (cancelled vs failed). Writes to the configured sinks on finish. |
 | `traceact/decorators.py` | `@traced_action` for sync and async functions: argument capture (with per-field transforms), the reserved `traceact_context` kwarg for queue propagation, status/exception handling. |
 | `traceact/config.py` | `TraceConfig`, `configure()`, `reset_config()`, `get_package_sinks()`: package-level configuration state and its resolution order. |
 | `traceact/budget.py` | `TraceBudget` and the `TraceBudget.production()` preset: recording limits (events, steps, depth, payload bytes, sampling). |
@@ -19,7 +19,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `traceact/redaction.py` | Field-name redaction patterns, `REDACTION_PRESETS`, and the `VALUE_PATTERNS` credential-format registry scanned over captured string content. |
 | `traceact/sinks.py` | `JsonlSink` (file, thread-safe, `max_bytes` rotation), `ConsoleSink` (stdout), `AsyncSink` (background-thread wrapper, bounded queue), `SqliteSink` (local database), `HttpSink` and `OtlpSink` (network delivery via stdlib `urllib`, guarded by `_netguard`, `network_policy` warn/enforce/off). |
 | `traceact/_netguard.py` | The shared outbound-network guard: destination classification (private/link-local/reserved/multicast/unspecified rejected by default, loopback always permitted), plain-`http://` policy, redirect-refusing opener. Used by `HttpSink`, `OtlpSink`, and the viewer's focus-hook forward. Touches DNS (`socket.getaddrinfo`). |
-| `traceact/log.py` | `TraceLog`: programmatic filter/query over JSONL files, folders, and `SqliteSink` databases; `view()` opens the viewer pre-filtered. Reads sources from disk on every terminal call. |
+| `traceact/log.py` | `TraceLog`: programmatic filter/query over JSONL files, folders, and `SqliteSink` databases; `view()` opens the viewer pre-filtered; dotted filter fields walk nested paths. Reads sources from disk on every terminal call. |
 | `traceact/propagation.py` | Cross-service linking: `inject_headers`, `inject_context`, `propagate`, `extract_trace_id` — the `traceact-trace-id` / `traceact-correlation-id` header pair. |
 | `traceact/middleware.py` | `TraceActMiddleware` (WSGI) and `TraceActASGIMiddleware` (ASGI): automatic inbound propagation for Flask, Django, FastAPI, Starlette. |
 | `traceact/integrations/__init__.py` | Empty namespace marker; nothing in `integrations/` is imported by the top-level package. |
@@ -48,12 +48,14 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `tests/conftest.py` | `_clean_config` autouse fixture: `reset_config()` around every test. |
 | `tests/test_async_sink.py` | `AsyncSink`: queue policies, drop counters, shutdown flush, fork safety. |
 | `tests/test_decorators.py` | `@traced_action`'s `capture_inputs` resolution through the package-default → `configure()` → decorator chain. |
+| `tests/test_endings.py` | Ending classification and recording: cancelled coroutines are written (the dropped-trace defect), cancelled vs failed status mapping, sampled-out promotion of cancellations, the `errors=` code map. |
 | `tests/test_docs.py` | Docs hygiene: no internal references in public docs or shipped source; absolute README links. |
 | `tests/test_doctor.py` | `run_checks()` output shape and per-check statuses. |
 | `tests/test_event_inputs.py` | `capture_event_inputs`: opt-in recording, kill switch, redaction of event inputs. |
 | `tests/test_http_sink.py` | `HttpSink`: delivery, headers, failure counting, `network_policy` modes. |
 | `tests/test_integration_celery.py` | Queue propagation through a Celery-shaped task boundary. |
 | `tests/test_integration_langchain.py` | The LangChain adapter: run mapping, parentage, token counts, content opt-in. |
+| `tests/test_nested_filters.py` | Dotted-path filtering in `TraceLog` and over `/api/query`: list fan-out, operator composition, missing-path semantics, unchanged top-level behaviour. |
 | `tests/test_netguard.py` | `_netguard`: address classification, multi-answer DNS, redirect refusal (live loopback servers), public export pins. |
 | `tests/test_otlp_sink.py` | `OtlpSink`: span mapping, delivery, failure counting, `network_policy` modes. |
 | `tests/test_payload_hostility.py` | Hostile payloads can't crash the traced app; sink failures stay visible; the default sink mode writes immediately. |

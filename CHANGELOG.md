@@ -2,6 +2,19 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.2.0] — 2026-09-02
+
+### Added
+
+- **Cancellation is a distinct ending.** A traced call ending via `asyncio.CancelledError` or `KeyboardInterrupt` records `status: "cancelled"` — the exception captured in `errors`, always re-raised — instead of reading as a generic failure. Every other exception, `SystemExit` included, records as `failed`. Sampled-out frames promote a cancellation the same way they promote a failure (`always_trace_errors`, on by default). Compat note: a `KeyboardInterrupt` through a with-block previously recorded as `failed`; queries pinned to that should read `status="cancelled"` for interrupts now. See [How an ending is classified](https://github.com/traceact/traceact/blob/main/USAGE.md#how-an-ending-is-classified) in USAGE.md.
+- **Caller-declared error codes.** `@traced_action(errors={CustomerNotFound: "not_found", TimeoutError: "timeout"})` — also on `ActionTrace.start()` — stamps the code of the ending exception's first `isinstance` match onto its error-summary entry; a dict error's own `code` key survives into the summary too. The map classifies what happened and never changes what is raised; a malformed map raises `TypeError` at decoration time.
+- **Nested-path filtering.** A dot in a `TraceLog.filter` field walks into nested structures, and a path segment landing on a list matches if any element matches: `log.filter(**{"errors.code": "rate_limit"})`, `log.filter(**{"events.provider__contains": "anthropic"})`. Dots address the path, the `__` suffix stays the operator, so the two compose and a mistyped operator still raises. `GET /api/query` accepts the same dotted params. Dotless filters keep their original semantics unchanged.
+
+### Fixed
+
+- **A cancelled `@traced_action` coroutine's trace was never written.** The decorator caught `Exception` only, and `asyncio.CancelledError` derives from `BaseException` — so cancellation skipped the finish path entirely: no record, no error, nothing. Every `BaseException` ending now finishes and writes the trace before re-raising, on the decorator, context-manager, and sampled-out promotion paths alike.
+- **Sampled-out promoted records dropped the package-configured project name**, unlike every other record — they now resolve `configure(project=...)` the same way a sampled-in trace does.
+
 ## [1.1.0] — 2026-09-02
 
 ### Added

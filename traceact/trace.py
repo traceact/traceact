@@ -683,6 +683,7 @@ class ActionTrace(TraceHelpersMixin):
         depth: int = 0,
         effective_config: Optional[_EffectiveConfig] = None,
         effective_budget: Optional[_EffectiveBudget] = None,
+        error_codes: Optional[Dict[type, str]] = None,
     ) -> None:
         """
         Initialise a new trace. You should not call this directly — use
@@ -707,6 +708,10 @@ class ActionTrace(TraceHelpersMixin):
             depth:            Nesting depth (0 = root, 1 = first child, etc.).
             effective_config: Pre-resolved config (from _resolve_config).
             effective_budget: Pre-resolved budget (from _resolve_budget).
+            error_codes:      Caller-declared {ExceptionType: "code"} map;
+                              an exception ending the trace gets the code of
+                              its first isinstance match (declaration order)
+                              stamped onto its error-summary entry.
         """
         # --- Identity fields ---
         self.trace_id: str = new_trace_id()
@@ -782,6 +787,10 @@ class ActionTrace(TraceHelpersMixin):
             effective_budget or _resolve_budget(None, parent)
         )
 
+        # Caller-declared exception→code map (validated by start() or the
+        # decorator before it gets here). None means no codes are stamped.
+        self._error_codes: Optional[Dict[type, str]] = error_codes
+
         # --- Context management token ---
         # Stores the ContextVar token from push_trace() so we can restore the
         # previous active trace when this trace finishes.
@@ -825,6 +834,7 @@ class ActionTrace(TraceHelpersMixin):
         config: Optional[TraceConfig] = None,
         budget: Optional[TraceBudget] = None,
         parent: Optional[Any] = None,
+        errors: Optional[Dict[type, str]] = None,
     ) -> Union["ActionTrace", _NoOpTrace]:
         """
         Create a trace for use as a context manager.
@@ -852,6 +862,13 @@ class ActionTrace(TraceHelpersMixin):
         suppressed parent (disabled, sampled out, depth-capped) suppresses
         this child the same way nesting under it would.
 
+        ``errors`` maps exception types to short code strings
+        (``{TimeoutError: "timeout"}``). When an exception ends the trace,
+        the code of its first isinstance match (in declaration order) is
+        recorded on the error-summary entry, making failures queryable by
+        code instead of by stack-trace text. Validated here, so a bad
+        mapping raises TypeError where it's written.
+
         Returns:
             An ActionTrace (if tracing is active and not sampled out) or a
             _NoOpTrace (if tracing is disabled, sampled out, or depth exceeded).
@@ -868,6 +885,7 @@ class ActionTrace(TraceHelpersMixin):
             config_override=config,
             budget_override=budget,
             parent=parent,
+            error_codes=_validate_error_codes(errors, "ActionTrace.start()"),
         )
 
     # ------------------------------------------------------------------
@@ -890,14 +908,16 @@ class ActionTrace(TraceHelpersMixin):
         exc_tb: Any,
     ) -> None:
         """
-        Exit the trace context. Finishes the trace (success or failure) and
-        restores the ContextVar to its previous value.
+        Exit the trace context. Finishes the trace and restores the
+        ContextVar to its previous value. An escaping exception classifies
+        the ending: cancellation (asyncio.CancelledError, KeyboardInterrupt)
+        records as "cancelled", everything else as "failed" — see
+        _status_for_ending. The exception is recorded either way.
 
         Returns None (falsy) so exceptions are never suppressed.
         """
         if exc_type is not None:
-            # An exception escaped the with-block — the trace failed.
-            self._finish(status="failed", error=exc_val)
+            self._finish(status=_status_for_ending(exc_type), error=exc_val)
         else:
             self._finish(status="completed")
 
@@ -1214,7 +1234,24 @@ class ActionTrace(TraceHelpersMixin):
             self._touch_index.add(key)
             self._touches.append({"kind": kind, "target": target})
 
-    def _add_error(self, event_id: str, error: Any) -> None:
+    def _error_code_for(self, error: Any) -> Optional[str]:
+        """
+        The code from this trace's errors= map for an exception, or None.
+
+        First isinstance match wins, in the map's declaration order — so a
+        caller listing a subclass before its base gets the specific code.
+        Only exceptions are matched; dict errors carry their own "code" key
+        (see _add_error).
+        """
+        if self._error_codes is None or not isinstance(error, BaseException):
+            return None
+        for exc_type, code in self._error_codes.items():
+            if isinstance(error, exc_type):
+                return code
+        return None
+
+    def _add_error(self, event_id: str, error: Any,
+                   code: Optional[str] = None) -> None:
         """
         Add an error to the deduped trace-level error summary.
 
@@ -1227,14 +1264,24 @@ class ActionTrace(TraceHelpersMixin):
         every occurrence while the trace-level summary shows it once.
 
         The deduplication key is: "{error_type}:{message}".
+
+        ``code`` is the caller-declared error code: passed in for an
+        exception matched against the trace's errors= map, or read from a
+        dict error's own "code" key. Present on the summary entry only when
+        set, so records without codes keep their existing shape.
         """
         # Normalise the error to a dict so the summary is consistent.
-        if isinstance(error, Exception):
+        # BaseException, not Exception: a CancelledError or KeyboardInterrupt
+        # ending a trace is recorded with its own type name too.
+        if isinstance(error, BaseException):
             error_type = type(error).__name__
             message = str(error)
         elif isinstance(error, dict):
             error_type = error.get("type", "Error")
             message = error.get("message", str(error))
+            if code is None:
+                raw_code = error.get("code")
+                code = raw_code if isinstance(raw_code, str) else None
         else:
             error_type = "Error"
             message = str(error)
@@ -1242,11 +1289,14 @@ class ActionTrace(TraceHelpersMixin):
         key = f"{error_type}:{message}"
         if key not in self._error_index:
             self._error_index.add(key)
-            self._errors.append({
+            entry: Dict[str, Any] = {
                 "event_id": event_id,
                 "type": error_type,
                 "message": message,
-            })
+            }
+            if code is not None:
+                entry["code"] = code
+            self._errors.append(entry)
 
     # ------------------------------------------------------------------
     # In-flight streaming
@@ -1390,7 +1440,8 @@ class ActionTrace(TraceHelpersMixin):
 
         Args:
             status: "completed", "failed", or "cancelled".
-            error:  The exception that caused failure, if status is "failed".
+            error:  The exception that ended the trace, for "failed" and
+                    "cancelled" endings.
         """
         # Leave the streaming registry first: ended_at set below also gates
         # _maybe_stream_snapshot, so between these two lines a racing
@@ -1407,9 +1458,11 @@ class ActionTrace(TraceHelpersMixin):
         )
         self.status = status
 
-        # If the trace failed, add the top-level error to the error summary.
+        # A failed or cancelled ending records its exception in the error
+        # summary, stamped with the caller-declared code when one matches.
         if error is not None:
-            self._add_error(self.trace_id, error)
+            self._add_error(self.trace_id, error,
+                            code=self._error_code_for(error))
 
         # Push a compact summary to the direct parent (if this is a child trace).
         # The parent merges our touches and errors into its own sets.
@@ -1534,6 +1587,7 @@ def _create_trace(
     target: Optional[str] = None,
     database: Optional[str] = None,
     parent: Optional[Any] = None,
+    error_codes: Optional[Dict[type, str]] = None,
 ) -> Union[ActionTrace, _NoOpTrace]:
     """
     Shared factory for creating an ActionTrace (or returning a _NoOpTrace when
@@ -1615,13 +1669,18 @@ def _create_trace(
     # Packaged identity for a possible promoted failure record. Built only on
     # the suppressed paths below; None means "suppress absolutely".
     def _promote_info() -> Dict[str, Any]:
+        # project resolves through the package config here just as it does
+        # for an unsampled trace below — a promoted record must carry the same
+        # source identity a sampled-in run of the same frame would have.
         return {
-            "action": action, "kind": kind, "actor": actor, "project": project,
+            "action": action, "kind": kind, "actor": actor,
+            "project": project or get_package_project(),
             "correlation_id": correlation_id,
             "upstream_trace_id": upstream_trace_id,
             "meta": meta,
             "effective_config": effective_config,
             "effective_budget": effective_budget,
+            "error_codes": error_codes,
         }
 
     # --- Check 2: are we inside a sampled-out parent? ---
@@ -1676,6 +1735,7 @@ def _create_trace(
         depth=depth,
         effective_config=effective_config,
         effective_budget=effective_budget,
+        error_codes=error_codes,
     )
 
     # If the decorator passed operation and/or target, create an initial event.
@@ -1732,7 +1792,14 @@ class _SkippedTrace(_NoOpTrace):
         self._started_dt = datetime.now(timezone.utc)
 
     def _promote_failure(self, exc: BaseException) -> None:
-        """Write a failure record for this suppressed frame."""
+        """
+        Write a record for this suppressed frame's abnormal ending.
+
+        The status follows the same classification as a recorded trace:
+        cancellation records as "cancelled", everything else as "failed" —
+        a sampled-out frame's ending is no less recordable than a
+        sampled-in one's.
+        """
         if self._promote_info is None:
             return
         info = self._promote_info
@@ -1748,12 +1815,13 @@ class _SkippedTrace(_NoOpTrace):
             depth=0,
             effective_config=info["effective_config"],
             effective_budget=info["effective_budget"],
+            error_codes=info.get("error_codes"),
         )
         trace.sampled_out = True
         if self._started_dt is not None:
             trace._started_at = self._started_dt
             trace.started_at = _iso(self._started_dt)
-        trace._finish(status="failed", error=exc)
+        trace._finish(status=_status_for_ending(type(exc)), error=exc)
 
     def __enter__(self) -> "_SkippedTrace":
         self._mark_started()
@@ -1766,6 +1834,66 @@ class _SkippedTrace(_NoOpTrace):
         if self._context_token is not None:
             pop_trace(self._context_token)
             self._context_token = None
+
+
+# ---------------------------------------------------------------------------
+# Ending classification
+# ---------------------------------------------------------------------------
+
+def _status_for_ending(exc_type: Any) -> str:
+    """
+    The trace status for an exception type escaping a traced frame.
+
+    Cancellation is a distinct ending, not a failure: asyncio task
+    cancellation (asyncio.CancelledError) and a user interrupt
+    (KeyboardInterrupt) record as "cancelled". Every other exception —
+    Exception subclasses and remaining BaseExceptions (SystemExit
+    included: the action didn't finish and nobody asked it to stop) —
+    records as "failed". The exception itself is recorded on the trace in
+    both cases, and always re-raised by the caller.
+
+    asyncio is imported lazily: this path only runs for BaseExceptions
+    outside the Exception tree, so a purely synchronous app never pays the
+    asyncio import for `import traceact`.
+    """
+    if exc_type is None or not isinstance(exc_type, type):
+        return "failed"
+    if issubclass(exc_type, KeyboardInterrupt):
+        return "cancelled"
+    if not issubclass(exc_type, Exception):
+        import asyncio
+        if issubclass(exc_type, asyncio.CancelledError):
+            return "cancelled"
+    return "failed"
+
+
+def _validate_error_codes(errors: Optional[Dict[type, str]],
+                          where: str) -> Optional[Dict[type, str]]:
+    """
+    Validate an errors={ExcType: "code"} mapping at declaration time, so a
+    bad mapping fails where it's written rather than at the first failure.
+
+    Returns the mapping unchanged (insertion order is the match order), or
+    None for None. Raises TypeError naming the offending entry otherwise.
+    """
+    if errors is None:
+        return None
+    if not isinstance(errors, dict):
+        raise TypeError(
+            f"{where}: errors must be a dict mapping exception types to "
+            f"code strings, got {type(errors).__name__}"
+        )
+    for exc_type, code in errors.items():
+        if not (isinstance(exc_type, type) and issubclass(exc_type, BaseException)):
+            raise TypeError(
+                f"{where}: errors keys must be exception types, got {exc_type!r}"
+            )
+        if not isinstance(code, str) or not code:
+            raise TypeError(
+                f"{where}: errors values must be non-empty strings, "
+                f"got {code!r} for {exc_type.__name__}"
+            )
+    return errors
 
 
 # ---------------------------------------------------------------------------

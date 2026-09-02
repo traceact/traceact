@@ -45,7 +45,7 @@ import json
 import os
 import re as _re
 from collections import deque
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Public class
@@ -110,6 +110,20 @@ class TraceLog:
 
         A filter on a field that doesn't exist in a trace evaluates to False
         for that trace (i.e. the trace is excluded).
+
+        A dot in the field name walks into nested structures; a path
+        segment landing on a list matches if any element matches. Python
+        keyword arguments can't contain dots, so nested filters pass
+        through dict unpacking:
+
+            log.filter(**{"errors.code": "rate_limit"})
+            log.filter(**{"events.provider__contains": "anthropic"})
+
+        Dots address the path; the ``__`` suffix stays the operator — the
+        two compose (``"errors.code__contains"``). A dotted path that
+        resolves to no value matches nothing, including for value=None:
+        with nesting, "the key holds null" and "the path doesn't exist"
+        are different situations, and only the first is a match.
         """
         clone = self._copy()
         for key, value in kwargs.items():
@@ -586,6 +600,8 @@ def _parse_filter_key(key: str) -> Tuple[str, str]:
 
     "status"           → ("status", "eq")
     "action__contains" → ("action", "contains")
+    "errors.code"      → ("errors.code", "eq")   (dots stay in the field —
+                          they address a nested path; see _build_predicate)
     """
     if "__" in key:
         field, op = key.rsplit("__", 1)
@@ -607,6 +623,13 @@ def _build_predicate(
 
     The predicate returns False (exclude) when the field is absent from the
     trace dict — there is no separate "field exists" check needed in callers.
+
+    A dot in the field addresses a nested path ("errors.code",
+    "events.provider"): the path is walked segment by segment, and a
+    segment landing on a list fans out over its elements — the predicate
+    matches if any resolved value matches. Dots and the ``__`` operator
+    suffix compose ("errors.code__contains"). A dotted path resolving to
+    nothing matches nothing.
     """
     if "__" in key:
         field, op = key.rsplit("__", 1)
@@ -619,13 +642,11 @@ def _build_predicate(
             "Supported: contains, startswith, endswith, re (or no suffix for exact match)."
         )
 
-    def pred(trace: Dict[str, Any]) -> bool:
-        raw = trace.get(field)
-        # A missing field never matches any filter, regardless of operator.
+    def matches_one(raw: Any) -> bool:
         if raw is None:
             return value is None and op == "eq"
         if op == "eq":
-            return raw == value
+            return bool(raw == value)
         # String operators: convert both sides to lowercase for case-insensitive
         # matching. The value comes from the caller; raw comes from the trace.
         s = str(raw).lower()
@@ -642,7 +663,40 @@ def _build_predicate(
             return bool(_re.search(str(value), str(raw)))
         return False  # unreachable; op validated above
 
-    return pred
+    segments = field.split(".")
+
+    if len(segments) == 1:
+        # Top-level field: the original single-lookup path, byte-for-byte —
+        # including "absent field matches eq None", which the nested path
+        # deliberately does not inherit (see filter()).
+        def pred(trace: Dict[str, Any]) -> bool:
+            return matches_one(trace.get(field))
+        return pred
+
+    def nested_pred(trace: Dict[str, Any]) -> bool:
+        return any(matches_one(v) for v in _walk_path(trace, segments))
+
+    return nested_pred
+
+
+def _walk_path(value: Any, segments: List[str]) -> Iterator[Any]:
+    """
+    Yield every value reachable by walking ``segments`` into ``value``.
+
+    Dicts descend by key; a list fans out over its elements at whatever
+    depth it appears, including as the leaf — so "errors.code" visits the
+    code of every entry in the errors list, and a path ending on a list of
+    scalars yields each scalar. A missing key yields nothing.
+    """
+    if isinstance(value, list):
+        for item in value:
+            yield from _walk_path(item, segments)
+        return
+    if not segments:
+        yield value
+        return
+    if isinstance(value, dict) and segments[0] in value:
+        yield from _walk_path(value[segments[0]], segments[1:])
 
 
 def _passes(

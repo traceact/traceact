@@ -202,6 +202,9 @@ from traceact import traced_action, TraceConfig, TraceBudget
     config=TraceConfig(strict=True),# override package config for this trace only
     budget=TraceBudget(max_events=50), # override budget for this trace only
     correlation_id="corr_abc123",   # link this trace to related traces
+    errors={                        # stamp codes onto matching exceptions
+        TimeoutError: "timeout",    # (see Errors below)
+    },
 )
 def create_note(title, body, user_id):
     ...
@@ -220,9 +223,9 @@ async def authorise_payment(amount, currency):
 2. Detects whether a parent trace is active and makes this a child trace if so.
 3. Captures function arguments if `capture_inputs` is set.
 4. Records timing.
-5. Sets status to `"completed"` on success or `"failed"` on exception.
-6. Captures the exception as an error on failure.
-7. Re-raises exceptions — TraceAct never suppresses them.
+5. Sets status to `"completed"` on success, `"failed"` on exception, or `"cancelled"` when the call ends via `asyncio.CancelledError` or `KeyboardInterrupt`.
+6. Captures the ending's exception as an error either way.
+7. Re-raises everything — TraceAct never suppresses an exception, cancellation included.
 8. Writes the trace to the configured sinks.
 
 ---
@@ -241,6 +244,7 @@ with ActionTrace.start(
     project="my-app",
     correlation_id="corr_abc123",
     meta={"release": "v1.2"},
+    errors={TimeoutError: "timeout"},   # optional — see Error codes
 ) as trace:
     trace.input({"title": "Hello", "user_id": 42})
     trace.step("Validated input")
@@ -473,6 +477,43 @@ trace.event(
 ```
 
 TraceAct also deduplicates errors at the trace level — if the same error type and message occurs multiple times, the trace-level error summary shows it once.
+
+### Error codes
+
+An error dict may carry a `code` — a short, stable string naming the failure kind — and it survives into the trace-level summary, so failures become queryable by code instead of by message text:
+
+```python
+trace.event(kind="http", operation="get", target="api", status="failed",
+            error={"type": "RateLimitError", "message": "429", "code": "rate_limit"})
+
+TraceLog("traces.jsonl").filter(**{"errors.code": "rate_limit"}).all()
+```
+
+For exceptions the decorator (and `ActionTrace.start()`) accept an `errors=` map from exception types to codes. When an exception ends the traced call, the code of its first `isinstance` match — in declaration order, so list subclasses before their bases — is recorded on the error-summary entry:
+
+```python
+@traced_action(
+    action="customer.fetch",
+    errors={CustomerNotFound: "not_found", TimeoutError: "timeout"},
+)
+def fetch_customer(customer_id):
+    ...
+```
+
+The map classifies what happened; it never changes what is raised. A mapping that isn't `{ExceptionType: "code"}` raises `TypeError` at decoration time.
+
+### How an ending is classified
+
+Any exception escaping a traced frame finishes and records the trace before being re-raised — including `BaseException`s outside the `Exception` tree, so a cancellation can never leave a trace unwritten. The status classifies the ending:
+
+| Ending | Status |
+|---|---|
+| Returned normally | `"completed"` |
+| `asyncio.CancelledError` | `"cancelled"` |
+| `KeyboardInterrupt` | `"cancelled"` |
+| Any other exception (`SystemExit` included) | `"failed"` |
+
+The exception is recorded in `errors` for cancelled and failed endings alike, and sampled-out frames promote a record for a cancellation the same way they do for a failure (`always_trace_errors`, on by default).
 
 ---
 
@@ -1175,6 +1216,17 @@ log.filter(action__re=r"^order\.(create|update)$")
 log.filter(correlation_id="job_abc123")       # find one background job's traces
 ```
 
+**Nested paths.** A dot in the field name walks into nested structures, and a path segment landing on a list matches if any element matches. Python keyword arguments can't contain dots, so nested filters pass through dict unpacking:
+
+```python
+log.filter(**{"errors.code": "rate_limit"})            # any error with this code
+log.filter(**{"events.provider": "anthropic"})         # any event naming this provider
+log.filter(**{"meta.region": "eu-west-1"})             # nested dict descent
+log.filter(**{"events.target__contains": "sonnet"})    # dots and operators compose
+```
+
+Dots address the path; the `__` suffix stays the operator, so the two never collide and a mistyped operator still raises a `ValueError` naming the valid ones. A dotted path that resolves to no value matches nothing — with nesting, "the key holds null" and "the path doesn't exist" are different situations, and only the first matches `None`. Dotless filters keep their original semantics unchanged, including whole-value comparison for list fields.
+
 ### Terminal methods
 
 ```python
@@ -1451,6 +1503,8 @@ The full JSON object written to the JSONL sink:
 }
 ```
 
+An `errors` entry is `{"event_id", "type", "message"}`, plus a `"code"` key when one was declared for it — from a dict error's own `code`, or an `errors=` map matching the ending's exception (see [Error codes](#error-codes)).
+
 **Status values:**
 
 | Value | Meaning |
@@ -1460,7 +1514,7 @@ The full JSON object written to the JSONL sink:
 | `"failed"` | Ended with an unhandled exception |
 | `"cancelled"` | Explicitly stopped before finishing |
 
-Event-level `status` additionally accepts `"pending"` (see [Recording events](#recording-events)) — event status is caller-supplied, while a trace's own status only ever takes the four values above.
+Event-level `status` additionally accepts `"pending"` (see [Recording events](#recording-events)) — event status is caller-supplied, while a trace's own status only ever takes the four values above. How an escaping exception picks between `"cancelled"` and `"failed"`: see [How an ending is classified](#how-an-ending-is-classified).
 
 **`budget_hit`** is a separate boolean field, not a status. A trace can be `"completed"` with `budget_hit: true`, meaning the function ran to completion but TraceAct stopped recording events partway through.
 
@@ -1714,7 +1768,7 @@ The trace log's search box and the row-limit setting both operate on the live-ta
 GET /api/query?source=traces&status=failed&action__contains=order&limit=200
 ```
 
-- Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()`. Multiple params are ANDed, same as chaining `.filter()` calls. Because `source` and `limit` are reserved for the endpoint itself, trace fields with those two names can't be filtered over HTTP — use `TraceLog.filter()` directly for that.
+- Every query param except `source` and `limit` is a filter field, in the same `field` / `field__contains` / `field__startswith` / `field__endswith` form as `TraceLog.filter()` — dotted nested paths included (`?errors.code=rate_limit`, `?events.provider=anthropic`). Multiple params are ANDed, same as chaining `.filter()` calls. Because `source` and `limit` are reserved for the endpoint itself, trace fields with those two names can't be filtered over HTTP — use `TraceLog.filter()` directly for that.
 - `__re` isn't accepted here — it's rejected with `400`. `TraceLog.filter(field__re=...)` only makes sense when the pattern comes from trusted code; over HTTP it's arbitrary caller-supplied input, and a catastrophic-backtracking pattern could hang the request. Use `__re` directly against `TraceLog` in Python instead.
 - **`limit` is hard-capped at 1000 server-side.** Requesting `limit=5000` against a source with 3000 matches returns only the newest 1000 — but not silently: `count` in the response is the count *returned*, not the count that matched, and `limit_reached` (below) tells you whether more may exist.
 - The response carries two separate completeness flags, both `false` when the result is everything that matched:

@@ -137,12 +137,12 @@ Coordination contracts:
 
 | Component | Responsibility | Contract |
 |---|---|---|
-| `trace.py` — `ActionTrace` | Trace lifecycle, recording methods, parent/child linking, budgets, in-flight streaming | Never raises into the app under `strict=False`; parent from ambient context or explicit `parent=`; suppressed parents suppress children |
+| `trace.py` — `ActionTrace` | Trace lifecycle, recording methods, parent/child linking, budgets, in-flight streaming, ending classification | Never raises into the app under `strict=False`; parent from ambient context or explicit `parent=`; suppressed parents suppress children; every BaseException ending is recorded and re-raised — cancellation (`asyncio.CancelledError`, `KeyboardInterrupt`) as `cancelled`, the rest as `failed` |
 | `decorators.py` — `@traced_action` | Wrap sync/async callables; argument capture with per-field transforms | Capture spec validated at decoration time; wrapper decided at decoration, not call time |
 | `config.py` — `configure()` / `TraceConfig` | Package-level settings, validation | Spellings validated at construction; package `capture_inputs=False` is a kill switch no decorator overrides |
 | `redaction.py` | Field-name patterns, presets, value-pattern registry | `VALUE_PATTERNS` admits only near-unmistakable credential formats; registry mirrored in USAGE.md and pinned by tests |
 | `sinks.py` | Destinations; buffering; rotation; export formats | A sink is any object with `write(record)`; wrapping composes (`AsyncSink(inner)`); failures counted, never raised |
-| `log.py` — `TraceLog` | Programmatic queries over JSONL | Terminal calls re-read the source; bounded memory for `last`/`first`/`query`; collapses in-flight stubs, keeps orphaned ones |
+| `log.py` — `TraceLog` | Programmatic queries over JSONL | Terminal calls re-read the source; bounded memory for `last`/`first`/`query`; collapses in-flight stubs, keeps orphaned ones; dots in a filter field walk nested paths (lists fan out over elements), `__` stays the operator |
 | `propagation.py` / `middleware.py` | Cross-service linking via two headers | `traceact-trace-id` → `upstream_trace_id` (lineage); `traceact-correlation-id` passed through untouched (grouping) |
 | `viewer/server.py` | HTTP surface | All routes under one handler; token and base-path checks before dispatch |
 | `viewer/reader.py` — `SourceReader` | Snapshot + live tail (JSONL and SQLite) | Byte offsets per file / autoincrement-id cursor per database; a changed inode, a changed first-bytes fingerprint (inode numbers get reused, routinely on Linux), or a reset id sequence all force a full re-snapshot; last-wins in-flight dedupe; SQLite reads are read-only with a 0.5s timeout |
