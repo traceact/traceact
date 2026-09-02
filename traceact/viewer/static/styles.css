@@ -220,7 +220,7 @@ body {
 .path-copy-btn.copied { opacity: 1; pointer-events: none; color: var(--accent); }
 .path-copy-btn.copy-failed { opacity: 1; pointer-events: none; color: var(--status-failed); }
 
-/* Export sits next to the copy button and reveals on the same hover, so a
+/* Export is next to the copy button and reveals on the same hover, so a
    source row shows no controls until it's the one being pointed at. */
 .path-export-btn {
   background: none;
@@ -323,7 +323,7 @@ body {
 }
 .pf-badge-dismiss:hover { opacity: 1; }
 
-/* A caveat, not an error: the query returned real (not corrupted) results,
+/* A caveat, not an error: the query returned valid (not corrupted) results,
    just possibly not the complete set. Amber rather than the failed-red. */
 .pf-capped-note {
   display: inline-flex;
@@ -467,7 +467,7 @@ body {
   padding: 16px;
   color: var(--text-dim);
   font-size: 12.5px;
-  /* A real two-column grid, not padded text: the label column sizes to its
+  /* A true two-column grid, not padded text: the label column sizes to its
      widest label and the value column takes the rest. A long value (a full
      correlation UUID, shown untruncated so it stays copyable) wraps within
      its own column instead of either overflowing the card or, once wrapped,
@@ -779,7 +779,7 @@ body {
    list would push the "add source" controls off-screen. ~5 rows stay visible;
    the rest are one scroll away.
 
-   The inset panel treatment matters as much as the max-height — without a
+   The inset panel treatment is as important as the max-height — without a
    visible boundary, a row clipped mid-text at the scroll edge reads as a
    rendering fault rather than "there is more below". */
 #source-list {

@@ -139,6 +139,8 @@ Coordination contracts:
 |---|---|---|
 | `trace.py` — `ActionTrace` | Trace lifecycle, recording methods, parent/child linking, budgets, in-flight streaming, ending classification | Never raises into the app under `strict=False`; parent from ambient context or explicit `parent=`; suppressed parents suppress children; every BaseException ending is recorded and re-raised — cancellation (`asyncio.CancelledError`, `KeyboardInterrupt`) as `cancelled`, the rest as `failed` |
 | `decorators.py` — `@traced_action` | Wrap sync/async callables; argument capture with per-field transforms | Capture spec validated at decoration time; wrapper decided at decoration, not call time |
+| `helpers.py` — `TraceHelpersMixin` | Kind-specific event shorthands on the trace object (`db`, `http`, `file`, `model`, `tool`, `queue`) | Thin wrappers over `event()`; one resource field name (`target`) across all kinds, no per-kind aliases |
+| `ids.py` | Prefixed ID generation for traces, events, steps, and correlation groups | `{prefix}_{12 hex chars}` from `secrets`; the prefix names the record kind on sight |
 | `config.py` — `configure()` / `TraceConfig` | Package-level settings, validation | Spellings validated at construction; package `capture_inputs=False` is a kill switch no decorator overrides |
 | `redaction.py` | Field-name patterns, presets, value-pattern registry | `VALUE_PATTERNS` admits only near-unmistakable credential formats; registry mirrored in USAGE.md and pinned by tests |
 | `sinks.py` | Destinations; buffering; rotation; export formats | A sink is any object with `write(record)`; wrapping composes (`AsyncSink(inner)`); failures counted, never raised |

@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-02 10:49:38 UTC
+Last updated: 2026-09-02 16:39:12 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 
@@ -59,6 +59,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `tests/test_netguard.py` | `_netguard`: address classification, multi-answer DNS, redirect refusal (live loopback servers), public export pins. |
 | `tests/test_otlp_sink.py` | `OtlpSink`: span mapping, delivery, failure counting, `network_policy` modes. |
 | `tests/test_payload_hostility.py` | Hostile payloads can't crash the traced app; sink failures stay visible; the default sink mode writes immediately. |
+| `tests/test_shiplock.py` | The release gate as a test: shiplock's deterministic docs-vs-code checks against `shiplock.toml`; skips when shiplock isn't installed. |
 | `tests/test_project_name.py` | `configure(project=...)` cascading to traces, and the warning for a root trace written without one. |
 | `tests/test_propagation.py` | Header inject/extract across framework header objects; `propagate()`. |
 | `tests/test_quantum_kinds.py` | `gate`/`qstate` event kinds and their qubit touch derivation. |
@@ -86,6 +87,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | File | What it does |
 |---|---|
 | `pyproject.toml` | Package metadata, version, dev extras, the `traceact` console script, wheel package-data (USAGE.md, static assets, `py.typed`), pytest and mypy configuration. |
+| `shiplock.toml` | Release-gate configuration for shiplock: declared public docs, banned-word sweep globs, version/architecture/manifest/exports checks. Enforced by `tests/test_shiplock.py`. |
 | `MANIFEST.in` | sdist contents beyond the package (USAGE.md and friends). |
 | `launch.command` | Double-clickable macOS launcher: finds Python 3.10+, creates/reuses `.venv/`, installs traceact, starts the viewer. |
 | `README.md` | Front page: install, quick start, viewer tour, links to the full docs. |

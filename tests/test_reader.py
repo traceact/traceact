@@ -87,7 +87,7 @@ def test_poll_detects_delete_and_recreate_even_when_the_inode_is_reused(
     # Linux (observed in CI, not reproducible locally on macOS/APFS) can hand
     # a just-freed inode number straight back to the very next file created
     # at the same path — the exact pattern this test drives. When that
-    # happens, inode comparison alone reports "unchanged" for a genuinely
+    # happens, inode comparison alone reports "unchanged" for an entirely
     # different file, and poll() falls through to the stale-offset bug the
     # inode check exists to prevent. Forcing the collision here (rather than
     # hoping the OS reproduces it) makes the fingerprint fallback verifiable
@@ -95,11 +95,11 @@ def test_poll_detects_delete_and_recreate_even_when_the_inode_is_reused(
     import traceact.viewer.reader as reader_module
 
     # Simulate inode reuse: every call reports the same number, regardless
-    # of which physical file is actually at the path. Patched before the
-    # first read too, or the pre-patch real inode and the patched 999 would
+    # of which physical file is at the path. Patched before the
+    # first read too, or the pre-patch original inode and the patched 999 would
     # simply differ from each other and the (already-correct) inode check
     # alone would catch the replacement — telling us nothing about whether
-    # the fingerprint fallback actually did the catching.
+    # the fingerprint fallback did the catching.
     monkeypatch.setattr(reader_module, "_file_inode", lambda filepath: 999)
 
     path = tmp_path / "traces.jsonl"

@@ -83,7 +83,7 @@ class TraceConfig:
             True            — capture all named function arguments automatically,
                               applying redaction and payload limits.
             list of strings — capture only the named arguments in the list.
-                              This is the safest opt-in form: you choose exactly
+                              This is the safest opt-in form: you choose precisely
                               which fields are recorded.
 
         capture_outputs:
@@ -150,7 +150,7 @@ class TraceConfig:
                     f"Available: {sorted(REDACTION_PRESETS)}"
                 )
 
-        # In-flight streaming accepts exactly four spellings; anything else
+        # In-flight streaming accepts four spellings only; anything else
         # is a config typo and fails here, loudly, not at trace time.
         #   None/False — off (default)
         #   True       — slim stubs, 1s throttle
@@ -316,7 +316,7 @@ def reset_config() -> None:
 
     # Clear inbound propagation context too. A test that drives a WSGI app
     # through a caller that skips the PEP 3333 close() contract (Werkzeug's
-    # test client does exactly this) would otherwise leave an upstream trace ID
+    # test client does this) would otherwise leave an upstream trace ID
     # set on the thread, silently attaching it to every trace in later tests.
     from traceact.propagation import (
         _INCOMING_CORRELATION_ID,

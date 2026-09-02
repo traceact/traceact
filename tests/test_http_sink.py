@@ -131,7 +131,7 @@ class TestObservableFailures:
         sink = HttpSink("http://example.com/traces", network_policy="off")
         with mock.patch("urllib.request.OpenerDirector.open",
                         side_effect=urllib.error.URLError("refused")):
-            # Must return cleanly, not propagate.
+            # Must return without raising, not propagate.
             sink.write(_trace())
 
     def test_404_is_a_failure(self):

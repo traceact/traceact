@@ -1160,7 +1160,7 @@ class ActionTrace(TraceHelpersMixin):
         Name-based redaction is bypassed for these fields — the transform IS
         the caller's handling instruction for that field, and redacting a
         deliberate hash to "[redacted]" would destroy the correlation value
-        that made hashing worth asking for. Everything else still applies:
+        that motivated the hashing. Everything else still applies:
         size limits, serialisability, and the value scan (a transform output
         can't contain a credential, but scanning costs nothing and keeps the
         invariant simple: no string reaches a record unscanned).
@@ -1446,7 +1446,7 @@ class ActionTrace(TraceHelpersMixin):
         # Leave the streaming registry first: ended_at set below also gates
         # _maybe_stream_snapshot, so between these two lines a racing
         # heartbeat can no longer write a "running" stub for a trace whose
-        # final record is about to land.
+        # final record is about to be written.
         if self._stream_mode is not None:
             _stream_deregister(self)
 
@@ -1594,7 +1594,7 @@ def _create_trace(
     tracing cannot run).
 
     Both the @traced_action decorator and ActionTrace.start() call this function.
-    It centralises the checks that decide whether to create a real trace or skip:
+    It centralises the checks that decide whether to create a live trace or skip:
         1. Is tracing enabled?
         2. Is the current context a skip sentinel (sampled-out parent)?
         3. Should this trace be sampled out?
@@ -1626,7 +1626,7 @@ def _create_trace(
     # The two fields are deliberately separate: upstream_trace_id is the calling
     # service's trace (causal lineage), correlation_id is the workflow-wide
     # grouping ID passed through untouched. Folding one into the other would
-    # lose whichever the upstream service actually set.
+    # lose whichever the upstream service set.
     if upstream_trace_id is None or correlation_id is None:
         from traceact.propagation import (
             _INCOMING_CORRELATION_ID,
@@ -1644,9 +1644,9 @@ def _create_trace(
     # to run on, which has nothing to do with this trace's logical parent.
     current = get_active_trace()
     explicit_parent = parent is not None
-    # An explicit parent that isn't a real ActionTrace is the stand-in for a
+    # An explicit parent that isn't a live ActionTrace is the stand-in for a
     # suppressed one (disabled, sampled out, depth-capped). Its children are
-    # suppressed with it below, exactly as nested traces follow the skip
+    # suppressed with it below, just as nested traces follow the skip
     # sentinel — a kept child under a dropped parent would surface in the
     # sink as an orphan root.
     suppressed_parent = explicit_parent and not isinstance(parent, ActionTrace)
@@ -1686,11 +1686,11 @@ def _create_trace(
     # --- Check 2: are we inside a sampled-out parent? ---
     # If the ContextVar holds the SKIP sentinel, a parent was sampled out and
     # we must also skip — but with always_trace_errors on, a failure in this
-    # frame still needs a record, exactly as it would produce one per traced
+    # frame still needs a record, just as it would produce one per traced
     # frame in an unsampled run. A promote-capable _SkippedTrace provides that;
     # re-pushing SKIP over SKIP is harmless. An explicitly passed suppressed
     # parent is the same situation arriving as an argument instead of via the
-    # context, and gets the same treatment; an explicit real parent bypasses
+    # context, and gets the same treatment; an explicit live parent bypasses
     # the context check entirely (the ambient context is some other stack's).
     if suppressed_parent or (not explicit_parent and is_skip(current)):
         if effective_budget.always_trace_errors:
@@ -1715,7 +1715,7 @@ def _create_trace(
     if depth > effective_budget.max_depth:
         return _NoOpTrace()
 
-    # --- Create the real trace ---
+    # --- Create the live trace ---
     # If the caller didn't specify a project, inherit from the package config,
     # then from the parent trace. Package wins over parent so that a single
     # configure(project=...) stamps every trace regardless of nesting depth.
@@ -1779,7 +1779,7 @@ class _SkippedTrace(_NoOpTrace):
        dropped as before — that is what sampling is for.
 
     promote_info is None when always_trace_errors is off; suppression is then
-    absolute, exactly the pre-promotion behaviour.
+    absolute — the pre-promotion behaviour.
     """
 
     def __init__(self, promote_info: Optional[Dict[str, Any]] = None) -> None:

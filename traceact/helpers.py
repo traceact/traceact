@@ -38,9 +38,9 @@ class TraceHelpersMixin:
 
     if TYPE_CHECKING:
         # Declares the method this mixin depends on ActionTrace providing.
-        # Type-check-only: never executed, so it can't shadow the real
+        # Type-check-only: never executed, so it can't shadow the runtime
         # ActionTrace.event() at runtime, and a standalone use of this mixin
-        # still fails loudly with a real AttributeError instead of a no-op.
+        # still fails loudly with an AttributeError instead of a no-op.
         def event(self, kind: str, operation: Any = None, target: Any = None,
                   **kwargs: Any) -> None: ...
 

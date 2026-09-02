@@ -119,7 +119,7 @@ class _ContextClosingIterable:
 
 
 class _SizedIterableBytes(Iterable[bytes], Sized, Protocol):
-    """The shape _ContextClosingIterableWithLen actually requires: an
+    """The shape _ContextClosingIterableWithLen requires: an
     iterable of bytes that also supports len(). Only used for typing — the
     runtime guarantee comes from the hasattr(result, "__len__") check at the
     single call site that constructs this class (see wsgi_app_wrapper)."""

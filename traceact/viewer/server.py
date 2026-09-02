@@ -41,7 +41,7 @@
 #
 # Why SSE and not WebSockets:
 # The data flow is one-directional — the server pushes traces to the browser and
-# the browser never sends trace data back. SSE is exactly that shape, runs over
+# the browser never sends trace data back. SSE is that shape, runs over
 # plain HTTP, needs no library, and reconnects automatically. WebSockets would
 # be more machinery for no benefit.
 #
@@ -50,13 +50,13 @@
 # SourceReader, sends the most recent N traces as an initial "snapshot" message,
 # then polls that same reader on an interval and pushes any newly-appended
 # traces as "append" messages. Because one reader handles both phases, the tail
-# begins exactly where the snapshot ended — no trace is sent twice and none is
+# begins where the snapshot ended — no trace is sent twice and none is
 # missed in a gap between two separate requests.
 #
 # Concurrency:
 # ThreadingHTTPServer handles each request on its own thread, so a long-lived
 # SSE connection never blocks other requests (static files, adding a source,
-# a second stream). Threads are daemons so the process can exit cleanly.
+# a second stream). Threads are daemons so the process can exit without waiting on them.
 
 import heapq
 import hmac
@@ -116,7 +116,7 @@ _QUERY_ALLOWED_OPERATORS = {"eq", "contains", "startswith", "endswith"}
 # Hard ceiling on how many trace records one query can return. A requested
 # `limit` above this (or a huge one specifically intended to defeat the cap)
 # is silently reduced to this value — see the clamp in _serve_query() for
-# exactly where and why. Two things this bounds: the response payload sent to
+# where and why. Two things this bounds: the response payload sent to
 # the browser, and the per-file ring buffer inside TraceLog._read_bounded()
 # (each file's buffer is sized to `limit`, so an uncapped limit would also
 # defeat _read_bounded()'s own memory bound).
@@ -841,7 +841,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Clamp to [1, _QUERY_MAX_LIMIT] — a caller requesting more than the
         # ceiling (or 0/negative) gets at most _QUERY_MAX_LIMIT results rather
         # than an error or an unbounded response. This is NOT silent: whether
-        # the applied limit (clamped or not) was actually reached — meaning
+        # the applied limit (clamped or not) was reached — meaning
         # more matches may exist beyond what's returned — comes back as
         # limit_reached from TraceLog.query() itself below. See
         # _QUERY_MAX_LIMIT for why the ceiling exists at all.
@@ -928,7 +928,7 @@ class ViewerServer(ThreadingHTTPServer):
         self.base_path = _normalise_base_path(base_path)
         # When set, every /api/* request must present this token (see
         # _Handler._authorised). None — the default — leaves the server open
-        # to any local caller, exactly as before tokens existed.
+        # to any local caller, just as before tokens existed.
         self.token = token or None
         # When set, POST /api/focus forwards trace records to this URL (see
         # _serve_focus). Validated here so a bad URL fails at construction,
@@ -1085,7 +1085,7 @@ def _derive_name(path: str) -> str:
     2. Otherwise walk up the directory chain and use the first component that
        isn't generic, so ``~/Dev/agora/data/traces/traces.jsonl`` becomes
        "agora" rather than "traces". Without this every project on a machine
-       lands on the same name and the source picker can't tell them apart.
+       arrives at the same name and the source picker can't tell them apart.
 
     A shard or rotation suffix (``traces.1234.jsonl``,
     ``traces.20260726T120000000000Z.jsonl``) reduces to its first segment, so
@@ -1126,7 +1126,7 @@ def _parse_query_filters(query: Dict[str, list]) -> Dict[str, Any]:
         ValueError: the param uses an operator outside
             _QUERY_ALLOWED_OPERATORS (__re, or an unknown suffix). The caller
             turns this into a 400 — TraceLog.filter() would otherwise raise
-            its own ValueError for a genuinely unknown operator, but __re is
+            its own ValueError for a truly unknown operator, but __re is
             a *known*, valid TraceLog operator that this endpoint specifically
             declines to forward (see _QUERY_ALLOWED_OPERATORS for why).
     """
@@ -1188,7 +1188,7 @@ def _merged_lines(files: List[str]) -> Iterator[bytes]:
 
     Each JSONL segment is already in append order, so the segments are merged
     lazily rather than read into memory and sorted: peak memory is one line
-    per file, not the size of the source. That matters here because this
+    per file, not the size of the source. That is important here because this
     streams a whole source, which is the one request with no limit on it.
 
     Lines that don't parse, and records with no started_at, sort first under
@@ -1210,7 +1210,7 @@ def _keyed_lines(filepath: str) -> Iterator[Tuple[str, bytes]]:
     Blank lines are skipped: they carry no record, and dropping them keeps the
     merged output a valid JSONL stream. Every other line is passed through as
     written, with a trailing newline added if the file's last line lacked one
-    so segments concatenate cleanly.
+    so segments concatenate correctly.
     """
     try:
         with open(filepath, "rb") as f:

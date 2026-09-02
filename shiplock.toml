@@ -1,0 +1,38 @@
+# shiplock.toml — release-gate configuration for traceact.
+#
+# Declares the repo's public surfaces so `shiplock check` can hold the docs
+# against the code: docs exist, no banned words, no internal references,
+# README links absolute, versions aligned, every module named in
+# ARCHITECTURE.md, every source file listed in MANIFEST.md.
+
+[docs]
+public = ["README.md", "USAGE.md", "ARCHITECTURE.md", "CHANGELOG.md"]
+changelog = "CHANGELOG.md"
+readme = "README.md"
+
+[style]
+source_globs = ["traceact/**/*.py", "traceact/viewer/static/*", "tests/**/*.py"]
+# "gap" stays allowed as a precise technical term: the CSS gap property and
+# layout gap constants.
+allow = ["gap"]
+
+[version]
+package = "traceact"
+
+[architecture]
+doc = "ARCHITECTURE.md"
+source_dir = "traceact"
+exempt = ["__init__"]
+
+[manifest]
+doc = "MANIFEST.md"
+sources = [
+    "traceact/**/*.py",
+    "traceact/viewer/static/*",
+    "tests/**/*.py",
+]
+
+[[coverage]]
+object = "traceact"
+doc = "USAGE.md"
+kind = "exports"

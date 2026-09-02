@@ -69,7 +69,7 @@ def _ensure_flush_registered() -> None:
     """
     Register the atexit flush handler the first time a buffered trace is
     recorded. We register lazily so the handler is only installed when
-    actually needed.
+    needed.
     """
     global _flush_registered
     if not _flush_registered:
@@ -194,7 +194,7 @@ class JsonlSink:
         # for writes under PIPE_BUF (typically 4KB). A rich trace record with
         # events and payloads can exceed that, and two overlapping appends could
         # then interleave and corrupt a line. Holding this lock around the write
-        # guarantees one complete line lands before the next begins.
+        # guarantees one complete line is written before the next begins.
         #
         # Scope and limits:
         # This lock only coordinates writers inside one process. It does NOT
@@ -454,7 +454,7 @@ class SqliteSink:
                 status            TEXT,
                 started_at        TEXT,
                 ended_at          TEXT,
-                duration_ms       REAL,
+                duration_ms       FLOAT,
                 budget_hit        INTEGER DEFAULT 0,
                 record            TEXT NOT NULL
             );
@@ -495,8 +495,8 @@ class SqliteSink:
         doesn't have yet.
 
         SQLite's ALTER TABLE ADD COLUMN is cheap (metadata-only) and existing
-        rows get NULL for the new column, which is exactly right — those traces
-        genuinely had no value for it.
+        rows get NULL for the new column, which is correct — those traces
+        had no value for it.
         """
         expected = {
             "upstream_trace_id": "TEXT",
@@ -521,7 +521,7 @@ class SqliteSink:
 # misled into thinking all traces reached the collector.
 #
 # Hot-path note:
-# Each write() makes a synchronous HTTP request. For any real endpoint
+# Each write() makes a synchronous HTTP request. For any remote endpoint
 # this adds meaningful latency to the traced function's return path. Always
 # wrap HttpSink in AsyncSink for production use:
 #
@@ -808,7 +808,7 @@ def _trace_id_hex(traceact_id: str) -> str:
     """
     Convert a TraceAct trace ID to a 32-char hex string (128-bit OTel trace ID).
 
-    We hash the TraceAct ID with MD5 so the output is always exactly 32 hex
+    We hash the TraceAct ID with MD5 so the output is always 32 hex
     chars and is deterministic: the same TraceAct ID always produces the same
     OTel trace ID, making correlation reliable without any state.
     """
@@ -1230,7 +1230,7 @@ class OtlpSink:
 # AsyncSink wraps one or more inner sinks. When the application calls write(),
 # the record is placed on an in-memory queue and write() returns immediately.
 # A single background worker thread drains the queue and forwards each record
-# to the inner sinks. The application's only cost is an enqueue; all real I/O
+# to the inner sinks. The application's only cost is an enqueue; all sink I/O
 # happens off the hot path.
 #
 #     app thread ──write(record)──▶ [ queue ] ──▶ worker thread ──▶ inner sinks
@@ -1249,7 +1249,7 @@ class OtlpSink:
 # A private sentinel object used to tell the worker thread to stop. It's placed
 # on the queue by close(); when the worker pulls it, it drains anything left and
 # exits. Using a unique object (rather than None) means it can never be confused
-# with a real record.
+# with an ordinary record.
 _SHUTDOWN = object()
 
 
@@ -1298,7 +1298,7 @@ class AsyncSink:
 
     Notes:
         - The worker is a daemon thread, so it will not keep the interpreter
-          alive on its own. Always rely on close() / atexit to flush cleanly.
+          alive on its own. Always rely on close() / atexit to flush in full.
         - Inner-sink exceptions are swallowed (like all sink writes) so a
           failing sink never crashes the worker or the application.
     """
@@ -1427,7 +1427,7 @@ class AsyncSink:
         self._closed = True
         if not self._started:
             return
-        # Signal the worker to finish. It will drain any remaining real records
+        # Signal the worker to finish. It will drain any remaining ordinary records
         # before it sees the sentinel and exits.
         self._queue.put(_SHUTDOWN)
         if self._worker is not None:

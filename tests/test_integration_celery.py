@@ -1,15 +1,15 @@
 # tests/test_integration_celery.py
 #
-# Queue tracing exercised through REAL Celery dispatch — not a simulated
+# Queue tracing exercised through LIVE Celery dispatch — not a simulated
 # boundary. The test broker is Celery's in-memory transport, but the message
 # still takes the full production path: kombu JSON-serialises the payload,
 # the task executes on Celery's testing worker in a separate thread, and a
 # thread starts with its own empty ContextVar context. That means the
-# producer's ambient trace context is genuinely unreachable from the task —
+# producer's ambient trace context is unreachable from the task —
 # if the worker's trace comes out linked, the linkage travelled as data
 # through inject_context() / traceact_context, which is the claim under test.
 #
-# Same testing philosophy as test_integration_langchain.py: drive the real
+# Same testing philosophy as test_integration_langchain.py: drive the live
 # framework's own dispatch, not a hand-built imitation of it.
 
 import json
@@ -83,7 +83,7 @@ def test_celery_round_trip_links_worker_trace(sink_file, celery_app):
                 "traceact_context": inject_context(),
             })
 
-        # The task result proves the worker ran the real function body.
+        # The task result proves the worker ran the original function body.
         assert result.get(timeout=10) == 42
 
     records = _records(sink_file)

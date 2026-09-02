@@ -113,7 +113,7 @@ def _viewer_url(host: str, port: int, base_path: str = "",
     ``?source=`` (so the app attaches to that source rather than opening the
     picker), ``?token=`` (so a token-gated viewer's page can call its own
     API — the front-end reads it from location.search), and, with
-    ``open_map=True``, ``view=map&open=latest`` (so the page lands on the
+    ``open_map=True``, ``view=map&open=latest`` (so the page opens on the
     trace map for the newest trace instead of the log — see
     ``traceact view --map`` in cli.py).
     """
@@ -214,7 +214,7 @@ def launch_or_connect(
     The returned URL includes the prefix. Note that a viewer already running
     at a *different* prefix is reused as it stands: the prefix is fixed when a
     server starts, so this argument only takes effect on the launch that
-    actually spawns one. The returned URL always reflects where the viewer
+    spawns one. The returned URL always reflects where the viewer
     answering the call really lives.
 
     ``require_token`` starts the viewer with token auth: every API request
@@ -226,7 +226,7 @@ def launch_or_connect(
     function and its helpers read the token from the state file — while other
     OS users on a shared machine, who could otherwise reach the localhost
     port, are shut out. Like ``base_path``, this only takes effect on the
-    launch that actually spawns a server: a viewer already running is reused
+    launch that spawns a server: a viewer already running is reused
     with whatever token setting it started with, tokened or not.
 
     ``focus_hook`` starts the viewer with a focus hook: every trace gets a

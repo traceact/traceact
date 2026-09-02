@@ -154,9 +154,9 @@ class TraceLog:
         If fewer than n traces match, all matching traces are returned.
 
         Bounded: holds at most n matches per file in memory at once (see
-        _read_bounded), not the full matching set. This matters for a broad
+        _read_bounded), not the full matching set. The bound pays off for a broad
         filter (or no filter at all) over a large source — memory stays
-        proportional to n, not to how much of the source actually matches.
+        proportional to n, not to how much of the source matches.
         """
         traces, _capped, _limit_reached = self._read_bounded(n, newest=True)
         return traces
@@ -182,7 +182,7 @@ class TraceLog:
         - scan_capped: the scan gave up early (max_lines_scanned was hit)
           before it finished reading the source.
         - limit_reached: the scan finished (or at least got far enough to find
-          n matches), but n matches is exactly what was asked for — there may
+          n matches), but n matches is precisely what was asked for — there may
           be more beyond it that were never counted because counting stopped
           at n. This is true of any bounded query, not specific to an HTTP
           caller's limit= parameter or to max_lines_scanned; last(n) has the
@@ -439,8 +439,8 @@ class TraceLog:
         Detecting "there were more than n matches" (limit_reached) needs its
         own counter, not an inference from the final result's length: a
         maxlen-n deque always ends up at length <= n whether it received
-        exactly n items or a hundred thousand, so len(result) alone can't
-        distinguish "exactly n matches, nothing more" from "far more than n,
+        precisely n items or a hundred thousand, so len(result) alone can't
+        distinguish "n matches and no more" from "far more than n,
         most were evicted." total_matches counts every match found — cheap (an
         int increment), unlike holding every match would be — regardless of
         whether that match survives eviction into the final bounded result.
@@ -558,7 +558,7 @@ class TraceLog:
             # In-flight streaming appends "running" stubs that the final
             # record supersedes. Stubs are held per-file (latest wins) and
             # surface only if no final record ever arrives — which is
-            # exactly the crashed-trace case the stubs exist to preserve.
+            # precisely the crashed-trace case the stubs exist to preserve.
             # Memory here is bounded by the number of traces still open in
             # that file, not by file size. The finalized set records every
             # final trace_id, predicate match or not: a stub must never

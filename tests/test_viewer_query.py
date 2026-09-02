@@ -3,10 +3,10 @@
 # Tests for GET /api/query — the viewer's server-side search endpoint.
 #
 # This is the first pytest coverage viewer/server.py has had at all, so the
-# fixture below starts a real ViewerServer on an OS-assigned port and makes
-# real HTTP requests against it (urllib, stdlib only) rather than calling
-# handler methods directly — an HTTP-level test is what actually exercises
-# request parsing, status codes, and the JSON response shape a real client
+# fixture below starts a live ViewerServer on an OS-assigned port and makes
+# live HTTP requests against it (urllib, stdlib only) rather than calling
+# handler methods directly — an HTTP-level test is what exercises
+# request parsing, status codes, and the JSON response shape an external client
 # depends on.
 
 import json
@@ -42,8 +42,8 @@ def _trace(action="note.create", kind="app", status="completed",
 @pytest.fixture
 def running_server():
     """
-    Start a real ViewerServer on an OS-assigned free port, yield (base_url,
-    state) so tests can register sources, and shut it down cleanly afterward.
+    Start a live ViewerServer on an OS-assigned free port, yield (base_url,
+    state) so tests can register sources, and shut it down afterward.
     """
     state = ViewerState()
     server = ViewerServer("127.0.0.1", 0, state)
@@ -399,9 +399,9 @@ class TestConcurrency:
         # print a ConnectionResetError traceback to stderr from its own
         # keep-alive connection handling — not from _serve_stream, which
         # already catches this at its own layer, and not from anything this
-        # test asserts on. Any real browser tab closed mid-stream produces the
-        # exact same stderr noise against the real server; it's expected here
-        # too, not a sign this test is failing or hiding a real error.
+        # test asserts on. Any browser tab closed mid-stream produces the
+        # exact same stderr noise against a live server; it's expected here
+        # too, not a sign this test is failing or hiding an actual error.
         base_url, state = running_server
         f = tmp_path / "traces.jsonl"
         _write_jsonl(f, [_trace(f"t{i}") for i in range(5)])

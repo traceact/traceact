@@ -457,7 +457,7 @@ class TestOtlpSinkObservableFailures:
         sink = OtlpSink("http://localhost:4318", network_policy="off")
         with mock.patch("urllib.request.OpenerDirector.open",
                         side_effect=urllib.error.URLError("refused")):
-            sink.write(_trace())  # must return cleanly
+            sink.write(_trace())  # must return without raising
 
     def test_404_is_a_failure(self):
         sink = OtlpSink("http://localhost:4318", network_policy="off")

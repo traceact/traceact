@@ -3,8 +3,8 @@
 # Tests for serving the viewer under a path prefix, so it can sit behind an
 # existing app's reverse proxy on one port instead of exposing a second.
 #
-# Like test_viewer_query.py, these start a real ViewerServer on an OS-assigned
-# port and make real HTTP requests: the whole feature is about request paths
+# Like test_viewer_query.py, these start a live ViewerServer on an OS-assigned
+# port and make live HTTP requests: the whole feature is about request paths
 # and the bytes of the served HTML, neither of which a direct handler-method
 # call would exercise honestly.
 
@@ -105,7 +105,7 @@ class TestNormaliseBasePath:
 
 
 class TestRootDefaultUnchanged:
-    """The default must behave exactly as it did before base paths existed."""
+    """The default must behave as it did before base paths existed."""
 
     def test_index_served_at_root(self, rooted):
         url, _ = rooted

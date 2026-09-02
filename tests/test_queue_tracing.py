@@ -9,9 +9,9 @@
 #     links the job's trace to the enqueuing trace.
 #   - trace.queue() — the helper for recording publish/consume events.
 #
-# The queue boundary is simulated the way a real one behaves: the payload is
+# The queue boundary is simulated the way a production one behaves: the payload is
 # JSON round-tripped (queues serialise), and the "worker" runs after the
-# producer's trace has closed and its context is gone — in a real deployment
+# producer's trace has closed and its context is gone — in a production deployment
 # it's a different process with a fresh, empty ContextVar context.
 
 import asyncio

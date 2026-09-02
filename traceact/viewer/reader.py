@@ -138,7 +138,7 @@ class SourceReader:
         self._inodes: Dict[str, Optional[int]] = {}
         # Per-file first-bytes fingerprint — see _file_fingerprint(). Inode
         # reuse (routine on Linux for a fast delete+recreate at the same
-        # path) can leave _inodes reporting "unchanged" for a genuinely
+        # path) can leave _inodes reporting "unchanged" for an entirely
         # different file; this catches that.
         self._fingerprints: Dict[str, Optional[bytes]] = {}
 
@@ -257,7 +257,7 @@ class SourceReader:
 
         if replaced:
             # Discard whatever `fresh` picked up from the wrong byte offset
-            # and rebuild cleanly. snapshot() re-reads every file from the
+            # and rebuild from scratch. snapshot() re-reads every file from the
             # start and refreshes both _offsets and _inodes.
             return {"kind": "snapshot", "traces": self.snapshot(limit)}
 
@@ -423,7 +423,7 @@ def _file_fingerprint(filepath: str) -> Optional[bytes]:
     routinely hands the just-freed inode number straight back to the very
     next file created at the same path — observed in CI (Linux runners) but
     not locally (macOS/APFS), where inode reuse this immediate is rare. When
-    that happens, _file_inode() alone reports "unchanged" for a genuinely
+    that happens, _file_inode() alone reports "unchanged" for an entirely
     different file. An append-only writer never rewrites bytes already on
     disk, so the file's opening bytes are stable for as long as the same
     logical file exists; any difference here is unambiguous replacement,

@@ -88,7 +88,7 @@ def _post(url, payload, headers=None):
 
 
 class TestDefaultStaysOpen:
-    """No token configured — the server behaves exactly as before."""
+    """No token configured — the server behaves as before."""
 
     def test_api_needs_no_token(self, open_server):
         url, _ = open_server

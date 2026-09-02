@@ -2,7 +2,7 @@
 #
 # Tests for distributed trace propagation.
 #
-# Header collections are tested in the form real callers actually pass them:
+# Header collections are tested in the form callers pass them:
 # Title-Case keys (what Werkzeug/Flask and Django reconstruct from the wire),
 # and the actual header classes from Werkzeug, Starlette, Django, and requests
 # rather than hand-built dicts shaped to match the implementation.
@@ -105,14 +105,14 @@ class TestNormaliseHeaders(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# extract_* against REAL framework header objects
+# extract_* against LIVE framework header objects
 # ---------------------------------------------------------------------------
 
 class TestExtractAgainstRealFrameworks(unittest.TestCase):
     """
     Each framework below reconstructs header names its own way and none of the
     header classes subclass dict. These are the inputs the documented recipe
-    actually produces.
+    produces.
     """
 
     def test_werkzeug_headers_object(self):
@@ -144,7 +144,7 @@ class TestExtractAgainstRealFrameworks(unittest.TestCase):
         self.assertEqual(extract_trace_id(h), "trc_rq")
 
     def test_flask_request_headers_end_to_end(self):
-        """A real Flask request object, not a simulated one."""
+        """A live Flask request object, not a simulated one."""
         from flask import Flask, request
         app = Flask(__name__)
         captured = {}
@@ -242,7 +242,7 @@ class TestInjectHeaders(_SinkTestCase):
 class TestPropagate(_SinkTestCase):
 
     def test_upstream_trace_id_set_not_correlation(self):
-        """The core semantic fix: a trace id must not land in correlation_id."""
+        """The core semantic fix: a trace id must not end up in correlation_id."""
         with propagate({TRACE_HEADER_TITLE: "trc_up"}):
             with ActionTrace.start(action="downstream.op"):
                 pass
@@ -372,7 +372,7 @@ class TestRoundTrip(_SinkTestCase):
             wire_headers = inject_headers({"Content-Type": "application/json"})
             service_a_trace_id = a.trace_id
 
-        # Wire transit: a real client/server would Title-Case these names.
+        # Wire transit: a live client/server would Title-Case these names.
         received = {k.title(): v for k, v in wire_headers.items()}
 
         with propagate(received):
@@ -423,7 +423,7 @@ class TestTraceActMiddleware(_SinkTestCase):
         return inner
 
     def _drive(self, app, environ):
-        """Iterate and close, exactly as a conforming WSGI server does."""
+        """Iterate and close, the way a conforming WSGI server does."""
         statuses = []
         body = app(environ, lambda s, h: statuses.append(s))
         chunks = list(body)
@@ -545,7 +545,7 @@ class TestTraceActMiddleware(_SinkTestCase):
         body.close()
 
     def test_flask_end_to_end(self):
-        """Real Flask app behind the middleware, driven by its test client."""
+        """A live Flask app behind the middleware, driven by its test client."""
         from flask import Flask
 
         app = Flask(__name__)
@@ -651,7 +651,7 @@ class TestTraceActASGIMiddleware(_SinkTestCase):
         self.assertEqual(seen, ["websocket", "lifespan"])
 
     def test_starlette_end_to_end(self):
-        """Real Starlette app + TestClient through the middleware."""
+        """A live Starlette app + TestClient through the middleware."""
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
@@ -756,7 +756,7 @@ class TestSqliteSinkUpstreamColumn(unittest.TestCase):
                 status          TEXT,
                 started_at      TEXT,
                 ended_at        TEXT,
-                duration_ms     REAL,
+                duration_ms     FLOAT,
                 budget_hit      INTEGER DEFAULT 0,
                 record          TEXT NOT NULL
             );

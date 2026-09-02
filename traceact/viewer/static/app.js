@@ -18,7 +18,7 @@
 
 /* Where the server is mounted. A viewer served under a path prefix (so it can
  * sit behind an existing app's proxy) declares the prefix on the page; served
- * at the root, the global is absent and every URL below stays exactly as it
+ * at the root, the global is absent and every URL below stays as it
  * was. Every request the app makes goes through api() so a mounted viewer's
  * calls can't escape its own mount and hit the host app instead. */
 const API_BASE = (typeof window !== "undefined" && window.__TRACEACT_BASE__) || "";
@@ -31,7 +31,7 @@ const API_TOKEN = (typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("token")) || "";
 
 /* `?view=map` and `?open=latest` are set by `traceact view SOURCE --map`
- * (see viewer/instance.py's _viewer_url()) so a single CLI command can land
+ * (see viewer/instance.py's _viewer_url()) so a single CLI command can open
  * a fresh browser tab straight on the trace map instead of the log. `view`
  * forces the initial tab; `open` auto-selects the newest trace once the
  * first one arrives so the map has something to render. Both are read once
@@ -132,7 +132,7 @@ function init() {
 /* ---- Page title ------------------------------------------------------- */
 //
 // The port a viewer answers on moves around: 8765 auto-increments when it's
-// taken, --new picks another, and every restart can land somewhere different.
+// taken, --new picks another, and every restart can end up somewhere different.
 // That makes the port a poor way to tell one viewer from another in browser
 // history or an address-bar autocomplete, where several instances otherwise
 // pile up as identical "TraceAct" entries.
@@ -219,7 +219,7 @@ function selectSource(name) {
   state.traces = [];
   state.selected = null;
   // Reset for the newly selected source — set again, for this source, only
-  // once (if ever) its own query below actually succeeds.
+  // once (if ever) its own query below succeeds.
   state.queryActive = false;
   state.queryIncomplete = false;
 
@@ -261,7 +261,7 @@ function openStream(name) {
       // full-source result, this tail-only snapshot must not clobber it —
       // the query's result is strictly better (whole source, not just the
       // last N). Ordering between the two is not guaranteed (both do a full
-      // file read; either can finish first), so this is a real check, not
+      // file read; either can finish first), so this is a necessary check, not
       // just handling for a rare edge case. Live appends below are unaffected
       // and keep arriving on top of whichever base is currently in place.
       if (!state.queryActive) {
@@ -305,7 +305,7 @@ function openStream(name) {
  * available on the freshly attached source, selecting the newest one. If
  * ?view=map was also requested, re-forces the map tab afterward: selectTrace()
  * opens the log/map tab from the user's saved "default trace view" setting,
- * which would otherwise silently override a deep link built to land on the
+ * which would otherwise silently override a deep link built to open on the
  * map regardless of that preference. */
 function maybeAutoOpenLatest() {
   if (!autoOpenPending || state.traces.length === 0) return;
@@ -791,7 +791,7 @@ function applyMapTransform() {
   if (pan) pan.style.transform = `translate(${mapZoom.tx}px,${mapZoom.ty}px) scale(${mapZoom.scale})`;
 }
 
-/* Zoom by `factor` about a viewport point, keeping whatever sits under that
+/* Zoom by `factor` about a viewport point, keeping whatever is under that
  * point pinned in place. Defaults to the centre of the visible area, which is
  * what the toolbar buttons want.
  *
@@ -1503,7 +1503,7 @@ function setTab(tab) {
 // Why this exists: filteredTraces() applies state.preFilters to state.traces,
 // but state.traces is capped at settings.limit (25-250) by the SSE tail. A
 // trace matching a precise pre-filter can easily have already scrolled out of
-// that small window on any source with real volume — the filter would then
+// that small window on any source with steady volume — the filter would then
 // find nothing not because nothing matches, but because the tail buffer never
 // held the match in the first place. /api/query answers the same filters
 // against the source on disk, so a pre-filtered view is no longer bounded by
@@ -1605,7 +1605,7 @@ function renderPreFilterBar() {
     .join("");
   // queryIncomplete covers two distinct causes (scan_capped: the scan gave up
   // early; limit_reached: more matches existed than the limit returned) —
-  // either way the result is real, just not necessarily every match, so this
+  // either way the result is valid, just not necessarily every match, so this
   // must read as a caveat, not an error.
   const incompleteNote = state.queryIncomplete
     ? `<span class="pf-capped-note" title="Not every match in the source may be shown — the scan stopped early or more matches exist than were returned.">⚠ results may be incomplete</span>`
@@ -1835,7 +1835,7 @@ function wireModal() {
 }
 
 /* Open the native OS file or folder picker via the server.  The server runs
- * osascript (macOS) or tkinter so it can return the real filesystem path,
+ * osascript (macOS) or tkinter so it can return the true filesystem path,
  * which is what we need for live tailing. */
 async function pickSource(type) {
   setDropStatus(type === "folder" ? "Opening folder picker…" : "Opening file picker…");
@@ -1940,7 +1940,7 @@ function renderSourceList() {
 // A displayed source path can end up in a screenshot shared off the machine
 // it runs on. Local filesystem paths are shortened to their last two segments
 // with a leading ellipsis; URLs carry no local directory information, so they
-// are shown unshortened. The full, real value is always available via the
+// are shown unshortened. The full value is always available via the
 // copy button next to the display text (see wireCopyButtons()).
 
 function isUrl(value) {
@@ -1988,8 +1988,8 @@ function copyViaExecCommand(text) {
 }
 
 // Wires every .path-copy-btn under `root` to copy its data-full value.
-// stopPropagation() matters here: in the source-list modal, the copy button
-// sits inside a row that has its own click handler (select this source).
+// stopPropagation() is needed here: in the source-list modal, the copy button
+// lives inside a row that has its own click handler (select this source).
 /* ---- Source export --------------------------------------------------- */
 //
 // Downloads a whole source as .jsonl via /api/export.
@@ -2004,7 +2004,7 @@ function exportSource(name) {
   const a = document.createElement("a");
   a.href = api(`/api/export?source=${encodeURIComponent(name)}`);
   // The server's Content-Disposition names the file and keeps this page
-  // loaded. download= only matters if that header is stripped by a proxy the
+  // loaded. download= only applies if that header is stripped by a proxy the
   // viewer is mounted behind, which is the deployment this endpoint is for.
   a.download = `${name}.jsonl`;
   document.body.appendChild(a);

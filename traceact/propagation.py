@@ -3,7 +3,7 @@
 # Distributed trace propagation: injecting and extracting trace context across
 # service boundaries via HTTP headers.
 #
-# Two distinct things travel across the wire and must stay separate fields:
+# Two distinct things cross the wire and must stay separate fields:
 #
 #   traceact-trace-id        The calling service's trace_id. On the receiving
 #                            side this becomes `upstream_trace_id` — causal
@@ -42,7 +42,7 @@
 #   ("Traceact-Trace-Id"), Starlette lowercases, ASGI delivers raw bytes.
 #   _normalise_headers() flattens all of those to a lowercase str->str dict
 #   before lookup, and accepts any mapping-like or pair-iterable object rather
-#   than requiring a real dict. Passing `request.headers` straight through
+#   than requiring a literal dict. Passing `request.headers` straight through
 #   works on every framework; so does dict(request.headers), a list of tuples,
 #   or the raw ASGI bytes list.
 
@@ -207,7 +207,7 @@ def inject_context(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     A queue's message is its propagation mechanism: the worker that picks up
     a job runs in a different process with a fresh, empty context, so trace
-    context has to travel as ordinary job data. Call this on the enqueue side
+    context has to move as ordinary job data. Call this on the enqueue side
     and ship the result with the job:
 
         job = inject_context({"user_id": 42})

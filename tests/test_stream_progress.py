@@ -297,7 +297,7 @@ class TestReaderDedupe:
 
     def test_live_end_to_end_single_row(self, stream_sink):
         # A streamed trace leaves stubs plus a final on disk; every reader
-        # view of it must be exactly one record, the final one.
+        # view of it must be one record only, the final one.
         with ActionTrace.start(action="e2e") as t:
             time.sleep(INTERVAL * 1.5)
             t.step("streaming")

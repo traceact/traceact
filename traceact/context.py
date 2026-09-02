@@ -18,7 +18,7 @@
 #
 # How the skip sentinel works:
 # When a trace is sampled out (sample_rate < 1.0 decides to skip it), we still
-# set the ContextVar — but we set it to the SKIP sentinel rather than to a real
+# set the ContextVar — but we set it to the SKIP sentinel rather than to a live
 # ActionTrace. Any nested @traced_action call checks the ContextVar first: if it
 # sees SKIP, it also skips. This ensures that a sampled-out parent silently
 # suppresses all its children without requiring any coordination between traces.

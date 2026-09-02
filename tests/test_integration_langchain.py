@@ -2,10 +2,10 @@
 #
 # Tests for traceact.integrations.langchain.TraceActCallbackHandler.
 #
-# These run against langchain-core's own callback dispatch — real fake
-# models, real tools, real runnables — not hand-built callback invocations.
+# These run against langchain-core's own callback dispatch — its own fake
+# models, tools, and runnables — not hand-built callback invocations.
 # The adapter's whole job is meeting LangChain's calling conventions
-# (run_id/parent_run_id as UUID kwargs, serialized payload shapes, error
+# (run_id/parent_run_id as UUID kwargs, serialized payload structure, error
 # routing), and a hand-rolled dict can't prove any of that. This is the same
 # lesson the propagation tests learned with Flask/Django header objects.
 
@@ -210,7 +210,7 @@ class TestRetrieverRuns:
         # kind is "retrieval", not "db": the retriever abstraction covers
         # vector stores, web search, and file search alike, and the callback
         # can't see which backs it. The target carries the class name, which
-        # is what actually identifies the backend.
+        # is what identifies the backend.
         from langchain_core.documents import Document
         from langchain_core.retrievers import BaseRetriever
 

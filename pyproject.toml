@@ -36,16 +36,16 @@ dev = [
     "pytest-asyncio>=0.21",
     # Test-order randomisation. Activates automatically once installed — no
     # flag needed. Kept on deliberately: an order-dependent failure means
-    # shared/global state is leaking between tests, which is a real bug.
-    # Never pin --randomly-seed in CI to "stabilise" a run; that hides exactly
-    # the failure mode this plugin exists to catch.
+    # shared/global state is leaking between tests — a bug.
+    # Never pin --randomly-seed in CI to "stabilise" a run; that hides the
+    # failure mode this plugin exists to catch.
     "pytest-randomly>=3.15",
-    # Real framework objects for propagation tests (extract_trace_id,
+    # Live framework objects for propagation tests (extract_trace_id,
     # TraceActMiddleware, TraceActASGIMiddleware). These are test-only —
     # traceact itself has zero runtime dependencies. Testing against a
-    # hand-built dict instead of an actual Flask/Django/Starlette request
-    # object was exactly the gap that let a header-parsing bug through
-    # 43 green tests; these are here so that never happens again.
+    # hand-built dict instead of a Flask/Django/Starlette request object
+    # was the gap that let a header-parsing bug through 43 green tests;
+    # these are here so that never happens again.
     "flask>=3.0",
     "starlette>=0.36",
     "django>=4.2",
@@ -55,15 +55,15 @@ dev = [
     # StarletteDeprecationWarning, and they break outright once Starlette drops
     # the httpx path.
     "httpx2>=2.9",
-    # Real framework objects for the LangChain adapter tests
+    # Live framework objects for the LangChain adapter tests
     # (traceact.integrations.langchain). Same rationale as above: the
     # adapter is exercised through langchain-core's own callback dispatch
-    # (fake models, real tools, real runnables), not hand-built dicts.
+    # (its own fake models, tools, and runnables), not hand-built dicts.
     "langchain-core>=0.2",
-    # Real Celery dispatch for the queue-tracing tests (inject_context /
+    # Live Celery dispatch for the queue-tracing tests (inject_context /
     # traceact_context). Uses Celery's in-memory broker and its testing
     # worker — no Redis or external service — but the job still crosses a
-    # genuine boundary: kombu JSON-serialises the message, and the worker
+    # true boundary: kombu JSON-serialises the message, and the worker
     # thread has its own empty ContextVar context, so trace linkage in the
     # test can only come from the payload.
     "celery>=5.3",
@@ -72,6 +72,9 @@ dev = [
     # inherit whatever these annotations claim — nothing catches drift
     # between an annotation and actual runtime behaviour without this.
     "mypy>=1.10",
+    # Release gate: docs-vs-code checks (shiplock.toml at the repo root).
+    # Runs as tests/test_shiplock.py so the same gate holds locally and in CI.
+    "shiplock>=0.1.0",
 ]
 
 [project.urls]
@@ -92,7 +95,7 @@ where = ["."]
 include = ["traceact*"]
 
 # Ship the viewer's static frontend (HTML/CSS/JS) inside the wheel, and a
-# copy of USAGE.md so the docs travel with `pip install traceact` itself —
+# copy of USAGE.md so the docs arrive with `pip install traceact` itself —
 # not just with the sdist or the GitHub repo. USAGE.md's source of truth
 # stays at the repo root (where README/LICENSE/CHANGELOG live); the build
 # copies it to traceact/USAGE.md right before packaging (see publish.yml and

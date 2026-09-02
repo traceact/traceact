@@ -15,7 +15,7 @@
 # 3. The wrapper calls _create_trace() to build (or skip) a trace.
 # 4. If the trace is a _SkippedTrace, SKIP is pushed onto the ContextVar and
 #    the function runs without recording anything.
-# 5. If the trace is a real ActionTrace, it's pushed onto the ContextVar as
+# 5. If the trace is a live ActionTrace, it's pushed onto the ContextVar as
 #    the active trace, inputs are optionally captured, the function runs, and
 #    the trace is finished on success or failure.
 # 6. The ContextVar is always restored in a finally block.
@@ -42,7 +42,7 @@
 # capture on the raw decorator-local `capture_inputs` value instead, package-
 # level configure(config=TraceConfig(capture_inputs=True)) would silently do
 # nothing whenever a decorator didn't also repeat capture_inputs=True itself —
-# which is exactly what happened before this was fixed. Folding the shorthand
+# which is what happened before this was fixed. Folding the shorthand
 # into the config override at decoration time (see decorator(), below) means
 # there's one resolution path, not two independent ones.
 
@@ -270,10 +270,10 @@ def _sync_wrapper(
     Build and return a sync wrapper for the given function.
 
     The wrapper follows this flow on every call:
-        1. Ask _create_trace() whether to create a real trace or skip.
+        1. Ask _create_trace() whether to create a live trace or skip.
         2. If skipped (sampled out): push SKIP onto ContextVar, run function, restore.
         3. If no-op (disabled / depth exceeded): run function with no context changes.
-        4. If real trace: push trace, capture inputs, run function, finish, restore.
+        4. If live trace: push trace, capture inputs, run function, finish, restore.
 
     Note: capture_inputs is no longer a separate parameter here — the
     decorator() function above folds it into `config` before calling this, so
@@ -334,7 +334,7 @@ def _sync_wrapper(
         if isinstance(trace_or_noop, _NoOpTrace):
             return func(*args, **kwargs)
 
-        # Case 3: We have a real trace. Run the full tracing lifecycle.
+        # Case 3: We have a live trace. Run the full tracing lifecycle.
         trace: ActionTrace = trace_or_noop
 
         # Push the trace onto the ContextVar. Any @traced_action calls made
@@ -450,7 +450,7 @@ def _async_wrapper(
         if isinstance(trace_or_noop, _NoOpTrace):
             return await func(*args, **kwargs)
 
-        # Real trace.
+        # Live trace.
         trace: ActionTrace = trace_or_noop
         token = push_trace(trace)
 
@@ -567,7 +567,7 @@ def _capture_inputs(
         bound.update(kwargs)
 
         # If capture_spec is a list, keep only the explicitly requested
-        # fields. This is the safest form: the developer chose exactly what
+        # fields. This is the safest form: the developer spelled out what
         # to record. An entry may carry a transform ("card_number:last4"),
         # in which case the reduced value is stored instead of the raw one.
         if isinstance(capture_spec, list):

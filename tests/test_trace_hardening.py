@@ -239,7 +239,7 @@ class TestPromotionContextManager:
 class TestSkipPropagationParity:
     def test_manual_parent_suppresses_successful_child(self, sink):
         # The child's own budget would keep it; the parent's suppression must
-        # win, exactly as it does under the decorator. Before the fix the
+        # win, as it does under the decorator. Before the fix the
         # child recorded as an orphan root.
         configure(budget=None)
         with ActionTrace.start(action="parent.op", budget=_sampled_out_budget()):

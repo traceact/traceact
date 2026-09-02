@@ -21,7 +21,7 @@
 # 2. VALUE-PATTERN matching (VALUE_PATTERNS): captured string values are
 #    scanned for the wire formats of known credential types — an AWS key is
 #    AKIA followed by 16 characters wherever it appears, whatever its field
-#    is called. This closes exactly the hole field-name matching leaves: a
+#    is called. This closes the hole field-name matching leaves: a
 #    key pasted into a field named "location", or embedded mid-sentence in
 #    free text. Only formats with distinctive, near-unmistakable signatures
 #    are listed, which is why this can default to ON; entropy-style guessing

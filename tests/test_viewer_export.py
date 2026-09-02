@@ -7,7 +7,7 @@
 # downloads their traces, and runs `traceact view` on them locally. That makes
 # fidelity the thing to test hardest. An export that silently drops the
 # malformed lines, or reorders records, produces a file that disagrees with
-# what the app actually wrote.
+# what the app wrote.
 
 import json
 import threading

@@ -3,7 +3,7 @@
 # Tests for reading SqliteSink databases as sources — in the viewer
 # (SourceReader snapshot + tail, export, doctor) and in TraceLog.
 #
-# Databases are produced by the real SqliteSink, not hand-built schemas, so
+# Databases are produced by SqliteSink itself, not hand-built schemas, so
 # these tests break if the sink's schema and the readers ever drift apart.
 # Detection is by magic bytes, not extension: SqliteSink outputs get named
 # .db, .sqlite, or anything else.

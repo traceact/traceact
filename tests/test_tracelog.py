@@ -368,7 +368,7 @@ class TestBoundedCorrectness:
     def test_filter_applied_before_bounding(self, tmp_path):
         # The ring buffer must hold n *matching* records, not just the last n
         # lines regardless of the filter — otherwise a filtered .last(n) could
-        # come back short even though n matches genuinely exist further back.
+        # come back short even though n matches do exist further back.
         f = tmp_path / "traces.jsonl"
         records = []
         for i in range(20):
@@ -427,9 +427,9 @@ class TestQuery:
         assert len(result["traces"]) == 10
 
     def test_limit_reached_false_when_exactly_n_matches(self, tmp_path):
-        # Exactly n matches exist — every one was found, none were cut off.
+        # Precisely n matches exist — every one was found, none were cut off.
         # This is the case limit_reached must NOT flag as "may be more",
-        # since there genuinely isn't more.
+        # since there is no more.
         f = tmp_path / "traces.jsonl"
         _write_jsonl(f, [
             _trace(f"t{i}", started_at=f"2026-07-25T{i:02d}:00:00Z")
@@ -523,10 +523,10 @@ class TestMaxLinesScanned:
         # count too — otherwise a file of mostly-noise could evade the cap
         # entirely by never producing a "match" to count.
         f = tmp_path / "traces.jsonl"
-        f.write_text("not json\n" * 10 + json.dumps(_trace("real")) + "\n")
+        f.write_text("not json\n" * 10 + json.dumps(_trace("target")) + "\n")
         result = TraceLog(str(f), max_lines_scanned=5).query(10)
         assert result["scan_capped"] is True
-        assert result["traces"] == []  # the real trace is past the cap
+        assert result["traces"] == []  # the target trace is past the cap
 
     def test_cap_stops_reading_further_files_in_folder_source(self, tmp_path):
         _write_jsonl(tmp_path / "a.jsonl", [_trace(f"a{i}") for i in range(20)])
@@ -582,7 +582,7 @@ class TestRenderTable:
 # TraceLog.view() — URL building + browser interaction
 # ---------------------------------------------------------------------------
 #
-# We never actually launch a viewer in tests. We patch launch_or_connect to
+# We never launch a viewer in tests. We patch launch_or_connect to
 # return a fixed base URL, and webbrowser.open to capture what URL was opened.
 
 _FAKE_BASE = "http://127.0.0.1:8765/"

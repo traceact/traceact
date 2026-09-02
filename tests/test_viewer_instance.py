@@ -129,7 +129,7 @@ class TestAddSourceDedupe:
         assert len(state.sources) == 1
 
     def test_distinct_paths_still_get_distinct_names(self, tmp_path):
-        # Dedupe must not collapse genuinely different files that happen to
+        # Dedupe must not collapse distinct files that happen to
         # share a basename.
         a_dir = tmp_path / "a"
         b_dir = tmp_path / "b"
