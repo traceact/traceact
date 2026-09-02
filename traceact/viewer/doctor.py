@@ -67,6 +67,20 @@ def run_checks(source: Optional[str] = None) -> Dict[str, Any]:
         "message": f"traceact {__version__}",
     })
 
+    # Cost estimates ride on the optional rates package. Informational
+    # either way — the viewer is fully functional without it.
+    from traceact.viewer.cost import rates_available
+    checks.append({
+        "label": "cost_estimates",
+        "status": "info",
+        "message": (
+            "rates installed — model events with a provider and token "
+            "counts show cost estimates" if rates_available()
+            else "rates not installed — cost estimates are off "
+                 "(pip install rates to turn them on)"
+        ),
+    })
+
     state_dir = os.path.expanduser("~/.traceact")
     try:
         os.makedirs(state_dir, exist_ok=True)

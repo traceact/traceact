@@ -120,7 +120,7 @@ traceact show [SOURCE] ...   # identical alias of view
 | `--base-path PATH` | *(none)* | Mount at a subpath for reverse-proxy deployments |
 | `--require-token` | off | Require a random token on every API request — keeps other OS users on a shared machine out |
 | `--map` | off | Open straight onto the trace map for SOURCE's newest trace, instead of the log |
-| `--focus-hook URL` | *(none)* | Show a Focus control on every trace; clicking it POSTs the full trace record to URL |
+| `--focus-hook URL` | *(none)* | Show a Focus control on every trace; clicking it POSTs the full trace record to URL. A non-loopback URL auto-enables `--require-token` |
 
 ### Port selection
 
@@ -150,7 +150,7 @@ The source modal (click the source name in the header) lets you:
 traceact doctor [SOURCE]
 ```
 
-Checks Python version, that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md#viewing-traces) for full output and exit-code details.
+Checks Python version, whether the optional rates package is installed (for cost estimates), that `~/.traceact` is writable, whether a viewer is already running, and (if `SOURCE` is given) that the file or folder parses as valid trace data. Useful for ruling out setup problems before debugging your own code. The same checks are also available from the viewer itself — Settings > **Run diagnostics**. See [USAGE.md](https://github.com/traceact/traceact/blob/main/USAGE.md#viewing-traces) for full output and exit-code details.
 
 ## Manual tracing
 
@@ -172,7 +172,7 @@ with ActionTrace.start(action="note.create", kind="app") as trace:
 | `Step` | A human-readable timeline marker within a trace |
 | `Event` | A structured operation: db, http, file, model, job, etc. |
 | `Touch` | A resource involved in the trace (auto-derived from events) |
-| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`, `AsyncSink`) |
+| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`, `SqliteSink`, `HttpSink`, `OtlpSink`, wrapped by `AsyncSink`) |
 
 ### Design principle: observable by choice, never forced blind
 
@@ -196,6 +196,8 @@ chain.invoke(inputs, config={"callbacks": [handler]})
 Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Prompt text isn't recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
 
 Captured values are guarded twice: field-name redaction (`password`, `api_key`, …) plus default-on content scanning that catches credential formats (AWS keys, `sk-` tokens, JWTs, PEM blocks) wherever they appear — even in a field named `location` or mid-sentence in free text. `traceact doctor --scan` runs the same registry over trace files already on disk.
+
+With the optional [rates](https://pypi.org/project/rates/) package installed (`pip install rates`), the viewer also prices model calls: a model event recorded with a provider and token counts — `trace.model(operation="completion", target="claude-sonnet-5", provider="anthropic", tokens_in=800, tokens_out=200)` — shows an estimated cost in the inspector, and each trace shows the sum across its calls. Estimates are computed at display time from a dated price snapshot; nothing is written into the trace records. Full detail: [USAGE.md's Cost estimates](https://github.com/traceact/traceact/blob/main/USAGE.md#cost-estimates).
 
 For long-running work, opt-in in-flight streaming (`TraceConfig(stream_progress=True)`) shows a `running` row that fills in as the trace progresses — and a process that crashes mid-trace leaves its last snapshot on disk as evidence instead of losing the trace entirely.
 

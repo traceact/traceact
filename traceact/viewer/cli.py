@@ -27,6 +27,7 @@
 #                   the full record to URL (see _serve_focus in server.py)
 
 import argparse
+import os
 import secrets
 import sys
 import threading
@@ -39,6 +40,7 @@ from traceact.viewer.server import (
     ViewerState,
     _normalise_base_path,
     _validate_focus_hook,
+    focus_hook_is_loopback,
 )
 import traceact.viewer.instance as _instance
 
@@ -119,7 +121,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "— passing this flag is your consent to send records there, "
              "and the destination is printed at startup. A hook that "
              "doesn't answer 2xx within a second shows a notice in the "
-             "viewer and never blocks it.",
+             "viewer and never blocks it. A non-loopback URL auto-enables "
+             "--require-token, since the API now has a reason to be "
+             "reached from off this machine.",
     )
     view.add_argument(
         "--require-token", action="store_true",
@@ -244,15 +248,30 @@ def _run_view(args: argparse.Namespace) -> int:
             return 0
 
     # No existing viewer (or --new / explicit --port): start one.
+    _configure_app_tracing()
     state = ViewerState()
     source_name = None
     if args.source is not None:
         source_name = state.add_source(args.source)
         print(f"Loaded source '{source_name}' → {state.sources[source_name]}")
 
+    # A focus hook that isn't on this machine gives the viewer's API a
+    # reason to be reached from somewhere other than "whatever's running
+    # locally" — auto-require a token in that case even without
+    # --require-token, same as if the user had asked for it. A loopback
+    # hook (the common case) leaves the viewer just as open as always.
+    require_token = args.require_token
+    if focus_hook and not require_token and not focus_hook_is_loopback(focus_hook):
+        require_token = True
+        print(
+            "Note: --focus-hook points off this machine, so token auth is "
+            "on automatically (pass --require-token to silence this note).",
+            file=sys.stderr,
+        )
+
     # The token is generated here, in-process, and reaches clients only via
     # the printed URL and the 0600 state file — never a command line.
-    token = secrets.token_urlsafe(24) if args.require_token else None
+    token = secrets.token_urlsafe(24) if require_token else None
 
     server, port = _start_server(args.host, args.port, state,
                                  base_path=base_path, token=token,
@@ -304,6 +323,34 @@ def _run_view(args: argparse.Namespace) -> int:
         if not args.new and not user_chose_port:
             _instance.clear_state()
     return 0
+
+
+def _configure_app_tracing() -> None:
+    """
+    Route package tracing to a file for the lifetime of this viewer process.
+
+    The CLI is the app here, so it owns the process's tracing configuration
+    — and only when nothing else has configured it first. Libraries the
+    viewer imports may trace themselves with traceact (rates, used for cost
+    estimates, does); with no sinks configured those traces would print to
+    stdout via the console fallback, interleaved with the viewer's own
+    startup output. A capped JsonlSink keeps them on disk and inspectable
+    instead.
+
+    An unwritable home directory skips this step: the console fallback
+    then applies, which is traceact's standard no-sink behaviour.
+    """
+    from traceact import JsonlSink, configure
+    from traceact.config import get_package_sinks
+
+    if get_package_sinks():
+        return
+    path = os.path.expanduser("~/.traceact/viewer-traces.jsonl")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        configure(sinks=[JsonlSink(path, max_bytes=10_000_000)])
+    except OSError:
+        pass
 
 
 def _run_doctor(args: argparse.Namespace) -> int:

@@ -14,7 +14,12 @@ traceact/
   context.py      — ContextVar for active trace, SKIP sentinel
   redaction.py    — SENSITIVE_PATTERNS baseline + REDACTION_PRESETS registry
   sinks.py        — JsonlSink (thread-safe, rotation via max_bytes), ConsoleSink,
-                    AsyncSink (background-thread wrapper; public as of v0.4)
+                    AsyncSink (background-thread wrapper; public as of v0.4),
+                    SqliteSink, HttpSink, OtlpSink
+  _netguard.py    — outbound network guard shared by HttpSink, OtlpSink, and
+                    the viewer's focus-hook forward; NetworkGuardError,
+                    NetworkGuardWarning
+  log.py          — TraceLog: programmatic filter/query over trace sources
   helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
   ids.py          — ID generation (trc_, evt_, stp_, corr_ prefixes)
   propagation.py  — extract_trace_id, inject_headers, propagate context manager,
@@ -32,6 +37,8 @@ traceact/
                     with inode-based delete+recreate detection
     doctor.py     — run_checks(): shared health-check logic behind both
                     `traceact doctor` and GET /api/doctor (Settings > Run diagnostics)
+    cost.py       — cost estimates for model events via the optional rates
+                    package (GET /api/cost)
     instance.py   — single-instance coordination (state file + HTTP probe);
                     launch_or_connect() for embedding in app backends
     static/
@@ -359,8 +366,11 @@ trace.http(operation="get", target="github-api")
 trace.file(operation="write", target="data/output.json", bytes_written=4096)
 trace.file(operation="read", target="config/settings.yaml")
 
-# Model
-trace.model(operation="completion", target="claude-sonnet-5", tokens_in=800, tokens_out=200)
+# Model. provider= names who served the call — with it and the token
+# counts recorded, the viewer can show a cost estimate for the event
+# (see "Cost estimates" under Viewing traces).
+trace.model(operation="completion", target="claude-sonnet-5",
+            provider="anthropic", tokens_in=800, tokens_out=200)
 trace.model(operation="embedding", target="text-embedding-3-small")
 
 # Tool — what an agent does between model calls. Distinct from trace.model():
@@ -660,7 +670,7 @@ trace.queue(operation="publish", target="exports", message_id="m_1")
 trace.queue(operation="consume", target="exports", message_id="m_1", attempt=1)
 ```
 
-The viewer's search box doesn't currently filter by `correlation_id` (it matches on action, kind, status, and touched targets); to pull together one job's traces, use "Copy JSON" on a trace to get its `correlation_id`, then `jq` the JSONL file for it: `jq 'select(.correlation_id == "corr_abc123")' data/traces/traces.jsonl`.
+To pull together one job's traces in the viewer, paste its `correlation_id` into the search box — the search matches correlation IDs alongside action, kind, status, and touched targets, and the inspector shows the ID in full for copying. Programmatically, `TraceLog.filter(correlation_id="corr_abc123")` does the same over the whole source.
 
 ---
 
@@ -936,11 +946,7 @@ from traceact import SqliteSink, configure
 configure(sinks=[SqliteSink("data/traces.db")])
 ```
 
-**Custom table name:**
-
-```python
-SqliteSink("data/traces.db", table="my_traces")
-```
+Traces are written to a table named `traces`.
 
 **Querying traces directly from the database:**
 
@@ -1013,6 +1019,24 @@ configure(sinks=[AsyncSink([sink])])
 # in a health check or periodic log:
 if sink.failed > 0:
     logger.warning("HttpSink: %d trace deliveries failed", sink.failed)
+```
+
+**Outbound network guard:** every request refuses to follow a redirect, and the destination is checked against `network_policy` (default `"warn"` — an unsafe destination still delivers the same as before this guard existed, but emits a `NetworkGuardWarning` once, at construction, so it's visible). `network_policy="enforce"` re-checks before every write and treats a blocked destination as a delivery failure — counted in `.failed`, never attempted, never raised. `network_policy="off"` skips the check entirely. `NetworkGuardWarning` is importable from the package root (`from traceact import NetworkGuardWarning`) so the `warnings` module can filter or escalate it; `NetworkGuardError`, the guard's exception type, is exported alongside it as the stable public name for guard failures (the sinks handle it internally — a blocked delivery counts in `.failed` rather than raising).
+
+"Unsafe" means: a destination resolving to a private, link-local, reserved, multicast, or unspecified address (loopback is always permitted), or plain `http://` to anything other than a loopback address. Both are configurable per sink:
+
+```python
+HttpSink(
+    "http://10.0.5.20:8080/traces",   # an internal collector
+    network_policy="enforce",
+    allow_private_network=True,       # permit the private-network destination
+)
+
+HttpSink(
+    "http://staging.internal/traces",
+    network_policy="enforce",
+    allow_insecure_http=True,         # permit plain http:// beyond loopback
+)
 ```
 
 ### OtlpSink
@@ -1097,6 +1121,8 @@ configure(sinks=[AsyncSink([sink])])
 if sink.failed > 0:
     logger.warning("OtlpSink: %d trace deliveries failed", sink.failed)
 ```
+
+**Outbound network guard:** same guard as `HttpSink` — see [Outbound network guard](#httpsink) above. `network_policy`, `allow_private_network`, and `allow_insecure_http` take the same values and defaults; every `OtlpSink("http://localhost:4318")` example on this page keeps working unchanged, since loopback `http://` is permitted by default.
 
 ### Fallback
 
@@ -1309,6 +1335,7 @@ TraceConfig(
     capture_event_inputs=False,  # whether trace.event(input=...) records anything
                                  # (explicit False here = global kill switch)
     redact_values=True,        # scan captured string content for credential formats
+    redaction_presets=[],      # extra field-name pattern sets (see Redaction presets)
     stream_progress=None,      # in-flight streaming: True | <seconds> | "full"
 )
 ```
@@ -1428,11 +1455,12 @@ The full JSON object written to the JSONL sink:
 
 | Value | Meaning |
 |---|---|
-| `"pending"` | Created but not yet executing |
-| `"running"` | Actively executing |
+| `"running"` | Actively executing — appears in the sink only as an in-flight stub (see [In-flight streaming](#in-flight-streaming)) |
 | `"completed"` | Finished successfully |
 | `"failed"` | Ended with an unhandled exception |
 | `"cancelled"` | Explicitly stopped before finishing |
+
+Event-level `status` additionally accepts `"pending"` (see [Recording events](#recording-events)) — event status is caller-supplied, while a trace's own status only ever takes the four values above.
 
 **`budget_hit`** is a separate boolean field, not a status. A trace can be `"completed"` with `budget_hit: true`, meaning the function ran to completion but TraceAct stopped recording events partway through.
 
@@ -1500,11 +1528,13 @@ Press Ctrl+C to stop.
 
 - **The whole record is sent, not selected fields.** A hook consumer usually relies on fields traceact itself doesn't define (a tab id, a window id, a page-load id); the viewer carries every field of a record through untouched, from file to hook.
 - Any `http://` or `https://` URL is accepted. Passing the flag is your consent to send trace records — including captured inputs and outputs — to that URL, and the destination is printed at startup so it's always visible. Point it at a remote URL only if you mean records to leave the machine.
-- The hook answers `2xx` for success. Anything else, a refused connection, or no answer within about a second shows a brief "Focus hook didn't respond" notice in the viewer. The viewer itself never blocks on the hook.
+- The hook answers `2xx` for success. Anything else, a refused connection, a redirect (never followed — see below), or no answer within about a second shows a brief "Focus hook didn't respond" notice in the viewer. The viewer itself never blocks on the hook.
 - The hook is fixed when the server starts, like `--require-token` and `--base-path`. Asking for one while reusing a running viewer prints a notice; stop and relaunch to change it.
 - From an embedding app, pass `focus_hook=` to `launch_or_connect()` — it forwards the flag to the viewer it spawns.
+- **A non-loopback hook auto-enables `--require-token`**, even without passing the flag: a hook pointed off this machine gives the viewer's API a reason to be reached from somewhere other than "whatever's running locally," so it stops being open to every other local process too. Pass `--require-token` explicitly to silence the note this prints.
+- The forward never follows a redirect the hook responds with — a redirect target could be a destination nothing here validated.
 
-The wire contract for a hook consumer: accept `POST` with `Content-Type: application/json`, body = one trace record, respond `2xx`. Nothing else is required — no CORS handling, no other routes.
+The wire contract for a hook consumer: accept `POST` with `Content-Type: application/json`, body = one trace record (capped at 8MB), respond `2xx`. Nothing else is required — no CORS handling, no other routes.
 
 ### Token auth
 
@@ -1540,6 +1570,7 @@ traceact doctor [SOURCE]
 Runs a handful of local checks and prints a pass/fail report — useful when tracing "isn't working" and you want to rule out setup problems before debugging your own code:
 
 - Python version meets the 3.10 minimum
+- whether the optional rates package is installed, so cost estimates are on (informational — see [Cost estimates](#cost-estimates))
 - the `~/.traceact` state directory exists and is writable (single-instance coordination and drag-drop imports depend on this)
 - whether a viewer is currently running (informational only — `doctor` doesn't require one)
 - if `SOURCE` is given: that the path exists and its lines parse as valid trace records
@@ -1548,11 +1579,12 @@ Runs a handful of local checks and prints a pass/fail report — useful when tra
 $ traceact doctor data/traces/traces.jsonl
 traceact doctor
 
-  ✓  Python 3.11 (OK, 3.10+ required)
-  ·  traceact 0.3.0
+  ✓  Python 3.10 (meets the 3.10+ requirement)
+  ·  traceact 1.1.0
+  ·  rates not installed — cost estimates are off (pip install rates to turn them on)
   ✓  State directory (/Users/you/.traceact) is writable
   ·  No viewer currently running (not required).
-  ✓  data/traces/traces.jsonl: 42/42 line(s) look like valid traces across 1 file(s)
+  ✓  data/traces/traces.jsonl: 1/1 line(s) look like valid traces across 1 file(s)
 
 All checks passed.
 ```
@@ -1605,6 +1637,43 @@ The Terminal window stays open so Ctrl+C stops the viewer. To pass a source file
 - **Source export** — each source row in the source picker shows a `⤓` button on hover. Clicking it downloads the full source as a `.jsonl` file via `/api/export`. The download is a snapshot as of the moment the request is made; traces written after it aren't included.
 - **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
 
+### Cost estimates
+
+With the optional [rates](https://pypi.org/project/rates/) package installed, the trace map's inspector prices model events at display time:
+
+```bash
+pip install rates
+```
+
+```python
+trace.model(operation="completion", target="claude-sonnet-5",
+            provider="anthropic", tokens_in=800, tokens_out=200)
+```
+
+That event's inspector row shows `est. $0.0036`, and a trace with at least one priced call shows a summed `Est. model cost` under its events. Hovering an estimate names the provider, model, token counts, and the date of the price snapshot it came from.
+
+What an event needs to be priced:
+
+- `kind="model"` with **token counts** — `tokens_in` and/or `tokens_out`, the same fields `trace.model()` and the LangChain adapter already record.
+- A **`provider`** field naming who served the call (`"anthropic"`, `"openai"`, `"azure"`, ...). One model id is sold by many providers at different prices, so an event without a provider shows a hint instead of a number — the caller knows which provider it called; the viewer won't guess.
+
+How the pricing works:
+
+- Estimates are computed when the event is displayed, never written into the trace record. Nothing about capture changes, and `import traceact` stays dependency-free.
+- Prices come from rates' bundled snapshot (USD per million tokens, matched case-insensitively on provider and model id), loaded once per viewer process. The viewer never touches the network for this, and every estimate's hover shows the snapshot's date.
+- Input and output tokens are priced. Cache and reasoning tokens aren't — there's no traceact field convention for their counts yet.
+- Without rates installed, no cost UI renders at all; `traceact doctor` and Settings > Run diagnostics both report the state either way. `/api/health` carries it as `cost_estimates` for API callers.
+
+Scripts can ask directly — see [`/api/cost`](#viewer-server-api):
+
+```bash
+curl "http://127.0.0.1:8765/api/cost?provider=anthropic&model=claude-sonnet-5&tokens_in=800&tokens_out=200"
+# {"cost": 0.0036, "currency": "USD", "snapshot_date": "2026-09-01",
+#  "provider": "anthropic", "model": "claude-sonnet-5"}
+```
+
+These are estimates: they price the recorded token counts against a dated snapshot of published list prices, and know nothing about your negotiated rates, tiers, caching discounts, or free credits.
+
 ### Run diagnostics (Settings)
 
 The Settings page has a "Run diagnostics" button that runs the exact same checks as `traceact doctor` on the command line, via `GET /api/doctor` — Python version, state directory writability, whether a viewer is running, and (if a source is loaded) whether its trace data looks valid. Results appear as a checklist with a short progress indicator, and each failing check shows a one-line explanation of what it means and what to do about it. Useful when something isn't showing up in the log and you want to rule out a setup problem without opening a terminal.
@@ -1615,7 +1684,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 
 | Method | Path | Request | Response |
 |---|---|---|---|
-| `GET` | `/api/health` | — | `{"status":"ok","version":"...","sources":N,"focus_hook":bool}` |
+| `GET` | `/api/health` | — | `{"status":"ok","version":"...","sources":N,"focus_hook":bool,"cost_estimates":bool}` |
 | `GET` | `/api/doctor?source=` | — | `{"ok":bool,"version":"...","checks":[{"label","status","message","hint"?}]}` |
 | `GET` | `/api/sources` | — | `[{"name":"...","path":"..."}]` |
 | `POST` | `/api/sources` | `{"path":"..."}` | `{"name":"...","path":"..."}` |
@@ -1624,6 +1693,7 @@ These endpoints are available while a viewer is running. Apps and scripts can ca
 | `GET` | `/api/stream?source=NAME&limit=N` | — | SSE stream: `snapshot` then `append` events |
 | `GET` | `/api/query?source=NAME&field[__op]=value&limit=N` | — | `{"traces":[...],"scan_capped":bool,"limit_reached":bool,"count":N}` |
 | `GET` | `/api/export?source=NAME` | — | `.jsonl` file download (`application/x-ndjson`) |
+| `GET` | `/api/cost?provider=&model=&tokens_in=&tokens_out=` | — | `{"cost":N,"currency":"USD","snapshot_date":"...","provider":"...","model":"..."}`; `400` on missing/junk params, `503` without rates installed, `404` when the pair has no usable price |
 | `POST` | `/api/focus` | one trace record (JSON object) | `{"ok":true}`, or `502 {"ok":false,"error":"..."}` when the hook failed; `404` on a server started without `--focus-hook` |
 
 `/api/export` returns all records for the named source as an NDJSON download. Sources addressed by registered name only — a path can't be passed as `source`. Single-file sources are streamed byte-identical with a `Content-Length` header; folder sources merge segments chronologically (`Content-Length` omitted). Malformed lines are preserved verbatim; blank lines are the only thing stripped. Missing `source` param → 400; unknown name → 404; registered source whose file has since been deleted → 200 with an empty body.
@@ -1657,6 +1727,7 @@ GET /api/query?source=traces&status=failed&action__contains=order&limit=200
 
 - The viewer is a **local, single-node development tool**. It reads files on the machine it runs on. Exposing one machine's traces to another over the network (`traceact serve`) is planned for a later version.
 - The viewer server binds to localhost by default. Only pass `--host 0.0.0.0` if you understand that it exposes trace data (which may contain sensitive payloads) to your network.
+- When the `traceact view` process itself has no sinks configured, the CLI routes package tracing to `~/.traceact/viewer-traces.jsonl` (capped, rotating) — libraries the viewer imports can trace themselves with traceact (rates does), and this keeps those records inspectable instead of printing them into the terminal. An app embedding the viewer keeps its own configuration; this applies only to the CLI's process.
 
 ---
 
@@ -1708,7 +1779,7 @@ launch_or_connect(
 ) -> str              # returns the viewer URL, e.g. "http://127.0.0.1:8765/?source=agora"
 ```
 
-The returned URL carries `?source=<name>` so the tab opens attached to *this* app's source — without the param the viewer opens on its source picker rather than auto-attaching to whichever source is first (see [Token auth](#token-auth) and the 0.10.0 changelog entry for why). With `require_token=True` the URL also carries `?token=`; the token itself is generated by the spawned viewer and picked up from the state file, and all of this function's own API calls authenticate with it automatically. Like `base_path`, the flag only takes effect on the launch that actually spawns a server — a viewer already running is reused with whatever token setting it started with.
+The returned URL carries `?source=<name>` so the tab opens attached to *this* app's source — without the param the viewer opens on its source picker rather than auto-attaching to whichever source is first (see [Token auth](#token-auth) and the 0.10.0 changelog entry for why). With `require_token=True` the URL also carries `?token=`; the token itself is generated by the spawned viewer and read back from the state file, or from the spawned CLI's printed startup URL when an explicit `port` keeps the instance out of the state file, and all of this function's own API calls authenticate with it automatically. A `focus_hook` pointing off this machine turns token auth on the same way, matching the CLI. Like `base_path`, these only take effect on the launch that spawns a server — a viewer already running is reused with whatever settings it started with.
 
 Pass `base_path` when the viewer sits behind a reverse proxy at a subpath instead of at the server root. The same value must be passed on every call for a given viewer instance — when reusing a running viewer, `launch_or_connect` reads the stored `base_path` from the state file and uses it for all subsequent API calls.
 
@@ -2094,9 +2165,23 @@ from traceact import (
     traced_action,  # decorator
     JsonlSink,      # write traces to a .jsonl file
     ConsoleSink,    # print traces to stdout
+    AsyncSink,      # background-thread wrapper around other sinks
+    SqliteSink,     # write traces to a local SQLite database
+    HttpSink,       # POST traces to an HTTP(S) collector
+    OtlpSink,       # export traces to an OTLP-compatible collector
+    TraceLog,       # programmatic filter/query over trace sources
+    REDACTION_PRESETS,       # the available redaction preset names
+    NetworkGuardError,       # the outbound network guard's exception type
+    NetworkGuardWarning,     # what the sinks' warn mode emits
     propagate,      # context manager for inbound propagation
     inject_headers, # stamp outbound request headers
+    inject_context, # stamp trace context into a queue job payload
+    extract_trace_id,         # read the inbound trace id from headers
+    extract_correlation_id,   # read the inbound correlation id from headers
     TraceActMiddleware,     # WSGI auto-propagation (Flask, Django)
     TraceActASGIMiddleware, # ASGI auto-propagation (FastAPI, Starlette)
 )
+
+import traceact
+traceact.__version__   # the installed version string
 ```

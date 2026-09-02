@@ -2,14 +2,19 @@
 #
 # Tests for OtlpSink.
 #
-# We don't spin up a real OTLP collector. We patch urllib.request.urlopen so
-# tests run offline with no ports, no threads, and no flakiness.
+# We don't spin up a live OTLP collector. We patch
+# urllib.request.OpenerDirector.open (the method both urlopen() and
+# traceact._netguard's guarded opener ultimately call) so tests run offline
+# with no ports, no threads, and no flakiness. Tests unrelated to network
+# policy pass network_policy="off" so the outbound guard's own DNS
+# resolution never runs here either — see TestNetworkPolicy at the bottom.
 
 import json
 import unittest.mock as mock
 import pytest
 
 from traceact import OtlpSink
+from traceact import _netguard
 from traceact.sinks import (
     _trace_id_hex,
     _span_id_hex,
@@ -297,8 +302,8 @@ class TestOtlpSinkDelivery:
             captured["url"] = req.full_url
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert captured["url"] == "http://localhost:4318/v1/traces"
@@ -310,8 +315,8 @@ class TestOtlpSinkDelivery:
             captured["url"] = req.full_url
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318/")
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318/", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert captured["url"] == "http://localhost:4318/v1/traces"
@@ -323,8 +328,8 @@ class TestOtlpSinkDelivery:
             captured["ct"] = req.get_header("Content-type")
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert captured["ct"] == "application/json"
@@ -336,8 +341,8 @@ class TestOtlpSinkDelivery:
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert "resourceSpans" in captured["body"]
@@ -349,8 +354,8 @@ class TestOtlpSinkDelivery:
             captured["key"] = req.get_header("X-honeycomb-team")
             return _mock_response(200)
 
-        sink = OtlpSink("https://api.honeycomb.io", headers={"x-honeycomb-team": "abc123"})
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("https://api.honeycomb.io", headers={"x-honeycomb-team": "abc123"}, network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert captured["key"] == "abc123"
@@ -362,8 +367,8 @@ class TestOtlpSinkDelivery:
             captured["timeout"] = timeout
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318", timeout=3.0)
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318", timeout=3.0, network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         assert captured["timeout"] == 3.0
@@ -378,8 +383,9 @@ class TestOtlpSinkDelivery:
         sink = OtlpSink(
             "http://localhost:4318",
             resource_attributes={"service.name": "my-app", "deployment.env": "prod"},
+            network_policy="off",
         )
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         res_attrs = {
@@ -396,8 +402,8 @@ class TestOtlpSinkDelivery:
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return _mock_response(200)
 
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=fake_urlopen):
             sink.write(_trace())
 
         scope = captured["body"]["resourceSpans"][0]["scopeSpans"][0]["scope"]
@@ -410,37 +416,37 @@ class TestOtlpSinkDelivery:
 
 class TestOtlpSinkObservableFailures:
     def test_success_does_not_increment_failed(self):
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", return_value=_mock_response(200)):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(200)):
             sink.write(_trace())
         assert sink.failed == 0
 
     def test_non_2xx_increments_failed(self):
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", return_value=_mock_response(500)):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(500)):
             sink.write(_trace())
         assert sink.failed == 1
 
     def test_connection_error_increments_failed(self):
         import urllib.error
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen",
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open",
                         side_effect=urllib.error.URLError("connection refused")):
             sink.write(_trace())
         assert sink.failed == 1
 
     def test_timeout_increments_failed(self):
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen",
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open",
                         side_effect=TimeoutError("timed out")):
             sink.write(_trace())
         assert sink.failed == 1
 
     def test_multiple_failures_accumulate(self):
         import urllib.error
-        sink = OtlpSink("http://localhost:4318")
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
         exc = urllib.error.URLError("refused")
-        with mock.patch("urllib.request.urlopen", side_effect=exc):
+        with mock.patch("urllib.request.OpenerDirector.open", side_effect=exc):
             sink.write(_trace())
             sink.write(_trace())
             sink.write(_trace())
@@ -448,22 +454,79 @@ class TestOtlpSinkObservableFailures:
 
     def test_failure_does_not_raise(self):
         import urllib.error
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen",
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open",
                         side_effect=urllib.error.URLError("refused")):
             sink.write(_trace())  # must return cleanly
 
     def test_404_is_a_failure(self):
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", return_value=_mock_response(404)):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(404)):
             sink.write(_trace())
         assert sink.failed == 1
 
     def test_201_is_success(self):
-        sink = OtlpSink("http://localhost:4318")
-        with mock.patch("urllib.request.urlopen", return_value=_mock_response(201)):
+        sink = OtlpSink("http://localhost:4318", network_policy="off")
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(201)):
             sink.write(_trace())
         assert sink.failed == 0
+
+
+# ---------------------------------------------------------------------------
+# Network policy (same guard, contract, and default as HttpSink — see
+# tests/test_http_sink.py::TestNetworkPolicy for the fuller adversarial set;
+# this mirrors it against OtlpSink's endpoint/write() shape specifically).
+# ---------------------------------------------------------------------------
+
+class TestNetworkPolicy:
+    def _mock_private_dns(self):
+        import socket as _socket
+        return mock.patch.object(
+            _netguard.socket, "getaddrinfo",
+            lambda host, port, **kw: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))],
+        )
+
+    def test_default_policy_is_warn(self):
+        sink = OtlpSink("http://localhost:4318")
+        assert sink.network_policy == "warn"
+
+    def test_warn_mode_warns_once_for_unsafe_endpoint(self):
+        with self._mock_private_dns():
+            with pytest.warns(_netguard.NetworkGuardWarning):
+                OtlpSink("https://internal.example.com")
+
+    def test_enforce_mode_blocks_unsafe_endpoint_without_connecting(self):
+        opened = []
+        sink = OtlpSink("https://internal.example.com", network_policy="enforce")
+        with self._mock_private_dns():
+            with mock.patch("urllib.request.OpenerDirector.open",
+                            side_effect=lambda *a, **k: opened.append(1)):
+                sink.write(_trace())
+        assert sink.failed == 1
+        assert opened == []
+
+    def test_allow_private_network_permits_enforce_mode_delivery(self):
+        sink = OtlpSink(
+            "https://internal.example.com",
+            network_policy="enforce",
+            allow_private_network=True,
+        )
+        with self._mock_private_dns():
+            with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(200)):
+                sink.write(_trace())
+        assert sink.failed == 0
+
+    def test_loopback_http_allowed_by_default_even_under_enforce(self):
+        # The bundled Quickstart example (OtlpSink("http://localhost:4318"))
+        # must keep working unchanged under the strictest opt-in mode too.
+        sink = OtlpSink("http://localhost:4318", network_policy="enforce")
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=_mock_response(200)):
+            sink.write(_trace())
+        assert sink.failed == 0
+
+    def test_invalid_network_policy_rejected(self):
+        with pytest.raises(ValueError, match="network_policy"):
+            OtlpSink("http://localhost:4318", network_policy="bogus")
 
 
 # ---------------------------------------------------------------------------

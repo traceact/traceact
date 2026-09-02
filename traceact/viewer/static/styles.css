@@ -524,6 +524,41 @@ body {
   padding-left: 2px;
 }
 
+/* Cost estimates on model events (rates installed — see app.js). The
+ * detail popup renders instantly on hover via a pure CSS rule, anchored to
+ * the estimate itself. */
+.cost-est {
+  position: relative;
+  color: var(--accent);
+}
+.cost-est.muted { color: var(--text-faint); }
+.cost-est[data-tip]:hover::after,
+.insp-cost-total[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 6px 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  width: max-content;
+  max-width: 260px;
+  white-space: normal;
+  z-index: 20;
+  pointer-events: none;
+}
+.insp-cost-total {
+  position: relative;
+  color: var(--accent);
+  font-size: 12px;
+  margin-top: 8px;
+}
+.insp-cost-total:empty { display: none; }
+
 .touch-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .touch-chip {
   border: 1px solid var(--border);

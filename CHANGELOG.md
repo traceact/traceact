@@ -2,6 +2,25 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.1.0] — 2026-09-02
+
+### Added
+
+- **Cost estimates for model calls in the viewer**, priced via the optional [rates](https://pypi.org/project/rates/) package (`pip install rates`; without it nothing changes and no cost UI renders). A model event recorded with a provider and token counts — `trace.model(operation="completion", target="claude-sonnet-5", provider="anthropic", tokens_in=800, tokens_out=200)` — shows `est. $0.0036` in the trace map's inspector, each trace shows the sum across its priced calls, and hovering an estimate names the provider, model, token counts, and price-snapshot date. Estimates are computed at display time from rates' bundled snapshot (loaded once per viewer process, never over the network); trace records are untouched and `import traceact` stays dependency-free. The provider field is required for a number: one model id is sold by many providers at different prices, so an event without one shows a hint instead of a guess. Scripts get the same lookup at `GET /api/cost`, `/api/health` reports availability as `cost_estimates`, and `traceact doctor` (and Settings > Run diagnostics) reports whether rates is installed. See [Cost estimates](https://github.com/traceact/traceact/blob/main/USAGE.md#cost-estimates) in USAGE.md.
+- **The viewer CLI routes package tracing to `~/.traceact/viewer-traces.jsonl`** (capped, rotating) when nothing has configured a sink in its process — libraries the viewer imports can trace themselves with traceact, and those records now go to an inspectable file instead of printing into the terminal. An embedding app's own configuration always wins; nothing changes for in-process servers.
+- **Outbound network guard, shared by `HttpSink`, `OtlpSink`, and the viewer's focus hook.** All three now refuse to follow a redirect, and check their destination: a hostname resolving to a private, link-local, reserved, multicast, or unspecified address is rejected unless explicitly allowed, and plain `http://` is loopback-only unless explicitly widened. `HttpSink`/`OtlpSink` gain `network_policy` (`"warn"` by default — an unsafe destination still delivers the same as before this guard existed, but warns once at construction; `"enforce"` re-checks every write and treats a block as a delivery failure; `"off"` skips the check), `allow_private_network`, and `allow_insecure_http`. See [Outbound network guard](https://github.com/traceact/traceact/blob/main/USAGE.md#httpsink) in USAGE.md.
+- **Viewer POST endpoints (`/api/focus`, `/api/sources`, `/api/import`) cap request bodies**, rejecting an oversized `Content-Length` with `413` before reading it into memory.
+- **A non-loopback `--focus-hook` auto-enables `--require-token`**, even without passing the flag — a hook pointed off the machine gives the viewer's API a reason to be reached from somewhere other than local processes. `launch_or_connect(focus_hook=...)` applies the same rule to the viewer it spawns, and its returned URL carries the token.
+- **`NetworkGuardError` and `NetworkGuardWarning` are exported from the package root.** The warn mode's warning can be filtered or escalated with the `warnings` module; `NetworkGuardError` is the guard's exception type, public so code handling guard outcomes has a stable name for it (the sinks themselves handle it internally — a blocked delivery is counted in `.failed`, never raised).
+
+### Fixed
+
+- **`launch_or_connect(require_token=True)` with a non-default `port` waited out its whole timeout and returned a URL without the token.** A viewer spawned on an explicit port stays out of the shared state file by design, which was the only place the caller looked for the token. The token is now also read from the startup URL the spawned CLI prints — a same-user channel, like the state file.
+- **The viewer printed a traceback whenever a client dropped its connection mid-request** — a closed tab during an SSE stream, an upload abandoned when the server answered early. Routine disconnects are now suppressed; other handler errors still print.
+- **USAGE.md documented a `SqliteSink(..., table=...)` parameter that doesn't exist** — the call raises `TypeError`. The example is removed; traces are written to the `traces` table.
+- **USAGE.md's queue-tracing section said the viewer's search box couldn't match `correlation_id`** and recommended a `jq` workaround — stale since 0.3.0 added that. Corrected.
+- **Trace map node text could overflow its box.** A node's kind.operation sub-line (say, `validate.extraction_output`) was never truncated while the box was a fixed width, so long names jutted past the border. Boxes are now sized per column to their longest line, up to a cap, with an ellipsis past it; the map's width grows to match, and panning and zooming behave as before.
+
 ## [1.0.0] — 2026-08-13
 
 ### Added

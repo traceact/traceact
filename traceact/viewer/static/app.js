@@ -76,6 +76,9 @@ const state = {
   // /api/health). Gates every Focus control; the hook URL itself never
   // reaches the page — the server forwards records to it.
   focusHook: false,
+  // True when the server can price model events (the optional rates
+  // package is installed — read from /api/health). Gates all cost UI.
+  costEstimates: false,
   settings: loadSettings(),
 };
 
@@ -157,6 +160,10 @@ async function loadVersion() {
     // Absent (an older server) reads as false, so no controls appear.
     state.focusHook = !!(data && data.focus_hook);
     applyFocusHookUI();
+    // And whether it can price model events. Same absent-reads-as-false
+    // treatment, so an older server renders no cost UI.
+    state.costEstimates = !!(data && data.cost_estimates);
+    renderInspector();
   } catch (e) {
     /* leave the badge empty rather than showing a wrong or stale version */
   }
@@ -418,6 +425,7 @@ function renderInspector() {
     ? inspectorFull(t)
     : inspectorSummary(t);
   wireInspectorButtons();
+  fillCostEstimates(el);
 }
 
 /* Log-tab inspector: a compact summary card + actions. */
@@ -512,15 +520,132 @@ function sectionEvents(t) {
     const arrow = `${esc(e.operation || "")} → ${esc(e.target || "")}`;
     const sub = eventSubline(e);
     const inp = eventInputLine(e);
+    const cost = eventCostLine(e);
     return `<div class="insp-event">
       <div class="insp-event-head">${kindBadge(e.kind)}
         <span>${ok ? "✓" : "✕"} ${arrow}</span></div>
       ${inp ? `<div class="insp-event-sub">${esc(inp)}</div>` : ""}
       ${sub ? `<div class="insp-event-sub">${esc(sub)}</div>` : ""}
+      ${cost}
     </div>`;
   }).join("");
+  const total = state.costEstimates
+    ? `<div class="insp-cost-total" id="insp-cost-total"></div>` : "";
   return `<div class="insp-section-label">EVENTS (${events.length})</div>
-    <div class="insp-list">${rows || `<span class="muted">none</span>`}</div>`;
+    <div class="insp-list">${rows || `<span class="muted">none</span>`}</div>${total}`;
+}
+
+/* ---- Cost estimates ---------------------------------------------------- */
+//
+// Model events that carry token counts get a per-call cost estimate, priced
+// server-side (GET /api/cost) via the optional rates package. Everything is
+// gated on state.costEstimates from /api/health: without rates installed,
+// none of this renders. Estimates are display-time only — nothing is written
+// into the trace record.
+//
+// The provider field is required for a number, never guessed: one model id
+// is sold by many providers at different prices, and only the caller knows
+// which one it called. A model event with tokens but no provider says so
+// instead of showing nothing.
+
+function toTokens(value) {
+  // A usable token count: a non-negative finite number (ints expected, but
+  // a numeric string still counts). Anything else reads as "not recorded".
+  const n = typeof value === "string" && value !== "" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0
+    ? Math.round(n) : null;
+}
+
+function eventCostLine(e) {
+  if (!state.costEstimates || e.kind !== "model") return "";
+  const tin = toTokens(e.tokens_in);
+  const tout = toTokens(e.tokens_out);
+  if (tin === null && tout === null) return "";
+  if (!e.provider) {
+    return `<div class="insp-event-sub"><span class="cost-est muted"
+      data-tip="Add provider= to this model event for a cost estimate. One model id is priced differently by different providers, so the tokens alone aren't enough.">tokens recorded — add provider= for a cost estimate</span></div>`;
+  }
+  return `<div class="insp-event-sub"><span class="cost-est"
+    data-provider="${esc(String(e.provider))}"
+    data-model="${esc(String(e.target || ""))}"
+    data-tin="${tin || 0}" data-tout="${tout || 0}">…</span></div>`;
+}
+
+// One in-flight-or-done promise per distinct lookup, for the page's
+// lifetime: prices don't change within a viewer session, and re-opening
+// the same trace should not re-ask the server.
+const costCache = new Map();
+
+function fetchCost(provider, model, tin, tout) {
+  const key = `${provider}|${model}|${tin}|${tout}`;
+  if (!costCache.has(key)) {
+    costCache.set(key, (async () => {
+      try {
+        const res = await fetch(api("/api/cost"
+          + `?provider=${encodeURIComponent(provider)}`
+          + `&model=${encodeURIComponent(model)}`
+          + `&tokens_in=${encodeURIComponent(tin)}`
+          + `&tokens_out=${encodeURIComponent(tout)}`));
+        const data = await res.json();
+        if (!res.ok) {
+          return { error: (data && data.error) || "no estimate available" };
+        }
+        return data;
+      } catch (err) {
+        return { error: "The viewer server didn't answer the price lookup." };
+      }
+    })());
+  }
+  return costCache.get(key);
+}
+
+async function fillCostEstimates(container) {
+  const spans = Array.from(container.querySelectorAll(".cost-est[data-provider]"));
+  if (!spans.length) return;
+  // Every model call that recorded tokens, including those refused for a
+  // missing provider — the total's "N of M priced" is honest about them.
+  const candidates = container.querySelectorAll(".cost-est").length;
+  let total = 0, priced = 0, currency = "USD", snapshot = "";
+  await Promise.all(spans.map(async (span) => {
+    const d = span.dataset;
+    const result = await fetchCost(d.provider, d.model, d.tin, d.tout);
+    if (result.error) {
+      span.textContent = "no cost estimate";
+      span.classList.add("muted");
+      span.setAttribute("data-tip", result.error);
+      return;
+    }
+    priced += 1;
+    total += result.cost;
+    currency = result.currency;
+    snapshot = result.snapshot_date;
+    span.textContent = `est. ${fmtCost(result.cost, result.currency)}`;
+    span.setAttribute("data-tip",
+      `Estimated from ${d.tin} tokens in + ${d.tout} tokens out at `
+      + `${result.provider} prices for ${result.model} `
+      + `(rates snapshot ${result.snapshot_date}).`);
+  }));
+  // The container may have been re-rendered while lookups were in flight;
+  // a detached total element just never shows, which is the right outcome.
+  const totalEl = container.querySelector("#insp-cost-total");
+  if (totalEl && priced > 0) {
+    const partial = priced < candidates
+      ? ` (${priced} of ${candidates} model calls priced)` : "";
+    totalEl.textContent = `Est. model cost: ${fmtCost(total, currency)}${partial}`;
+    totalEl.setAttribute("data-tip",
+      `Sum of this trace's per-call estimates (rates snapshot ${snapshot}).`);
+  }
+}
+
+function fmtCost(cost, currency) {
+  const prefix = currency === "USD" ? "$" : "";
+  const suffix = currency === "USD" ? "" : ` ${currency}`;
+  if (cost > 0 && cost < 0.0001) return `< ${prefix}0.0001${suffix}`;
+  let text;
+  if (cost >= 1) text = cost.toFixed(2);
+  else if (cost > 0) text = Number(cost.toPrecision(2)).toString();
+  else text = "0.00";
+  return `${prefix}${text}${suffix}`;
 }
 
 function eventInputLine(e) {
@@ -651,8 +776,19 @@ function renderMap() {
  * right with an animated dash so the trace reads as "playing" on repeat.
  * Falls back to touches as THROUGH nodes when a trace has no events. */
 function buildMap(t) {
-  const COLS = [40, 300, 560];
-  const NODE_W = 168, NODE_H = 56, GAP = 26, TOP = 56;
+  // Layout constants. Node widths are computed per column below, so a long
+  // model id or kind.operation sub-line gets a box that fits it instead of
+  // overflowing a fixed one; column x positions follow from those widths.
+  const NODE_W_MIN = 168;   // narrower content still gets the classic box
+  const NODE_W_MAX = 300;   // past this, text is truncated with an ellipsis
+  const NODE_H = 56, GAP = 26, TOP = 56;
+  const COL_GUTTER = 92;    // horizontal space between columns
+  const LEFT = 40;          // x of the first column
+  const PAD_X = 16;         // text inset from the box's left/right edges
+  // Monospace advance widths for the two text sizes used in a node
+  // (13px title, 11px sub — see .map-node-title / .map-node-kind).
+  const TITLE_CHAR_PX = 8.0;
+  const SUB_CHAR_PX = 6.8;
 
   const events = t.events || [];
   const origin = {
@@ -685,7 +821,32 @@ function buildMap(t) {
     TOP * 2 + NODE_H,
     360
   );
-  const width = 760;
+
+  // Width each column's boxes need to hold their longest line, clamped to
+  // [NODE_W_MIN, NODE_W_MAX]. All boxes in a column share one width so the
+  // column stays a column and its outgoing edges start on one line.
+  const colWidths = columns.map((col) => {
+    let needed = NODE_W_MIN;
+    for (const n of col) {
+      const title = PAD_X * 2 + String(n.title || "").length * TITLE_CHAR_PX;
+      const sub = PAD_X * 2 + String(n.sub || n.kind || "").length * SUB_CHAR_PX;
+      needed = Math.max(needed, title, sub);
+    }
+    return Math.min(Math.ceil(needed), NODE_W_MAX);
+  });
+
+  // Column x positions follow from the widths; the drawing grows to fit.
+  const COLS = [LEFT];
+  for (let i = 1; i < columns.length; i++) {
+    COLS.push(COLS[i - 1] + colWidths[i - 1] + COL_GUTTER);
+  }
+  const lastFilled = columns[2].length ? 2 : 1;
+  const width = Math.max(COLS[lastFilled] + colWidths[lastFilled] + LEFT, 760);
+
+  // How many characters fit each line at a column's width; anything longer
+  // is truncated with an ellipsis (only reachable once NODE_W_MAX clamps).
+  const titleChars = colWidths.map((w) => Math.floor((w - PAD_X * 2) / TITLE_CHAR_PX));
+  const subChars = colWidths.map((w) => Math.floor((w - PAD_X * 2) / SUB_CHAR_PX));
 
   // Position nodes: each column centred vertically.
   const placed = {};
@@ -711,7 +872,7 @@ function buildMap(t) {
   const edgeSvg = edges.map(([a, b]) => {
     const s = placed[a], d = placed[b];
     if (!s || !d) return "";
-    const x1 = s.x + NODE_W, y1 = s.y + NODE_H / 2;
+    const x1 = s.x + colWidths[s.ci], y1 = s.y + NODE_H / 2;
     const x2 = d.x, y2 = d.y + NODE_H / 2;
     const mx = (x1 + x2) / 2;
     const failed = d.status === "failed" ? " failed" : "";
@@ -719,7 +880,8 @@ function buildMap(t) {
   }).join("");
 
   const nodesSvg = Object.values(placed)
-    .map((n) => nodeSvg(n, NODE_W, NODE_H)).join("");
+    .map((n) => nodeSvg(n, colWidths[n.ci], NODE_H,
+                        titleChars[n.ci], subChars[n.ci])).join("");
 
   const svg = `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"
     xmlns="http://www.w3.org/2000/svg">${labels}${edgeSvg}${nodesSvg}</svg>`;
@@ -741,14 +903,14 @@ function nodeFromEvent(e) {
   };
 }
 
-function nodeSvg(n, w, h) {
+function nodeSvg(n, w, h, titleChars, subChars) {
   const color = statusColor(n.status);
   const mark = n.status === "failed" ? "✕" : "✓";
   return `
     <g class="map-node" data-node-id="${esc(n.id)}" transform="translate(${n.x},${n.y})">
       <rect class="map-node-box" width="${w}" height="${h}" rx="8"></rect>
-      <text class="map-node-title" x="16" y="24">${esc(truncate(n.title, 18))}</text>
-      <text class="map-node-kind" x="16" y="42" fill="${kindColor(n.kind)}">${esc(n.sub || n.kind)}</text>
+      <text class="map-node-title" x="16" y="24">${esc(truncate(n.title, titleChars))}</text>
+      <text class="map-node-kind" x="16" y="42" fill="${kindColor(n.kind)}">${esc(truncate(n.sub || n.kind, subChars))}</text>
       <circle cx="${w}" cy="${h}" r="11" fill="${color}"></circle>
       <text x="${w}" y="${h + 4}" text-anchor="middle" font-size="12" fill="#0a0c0d">${mark}</text>
     </g>`;

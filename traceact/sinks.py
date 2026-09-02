@@ -531,6 +531,25 @@ class SqliteSink:
 
 
 import urllib.request as _urllib_request
+import warnings as _warnings
+
+from traceact import _netguard
+
+
+def _warn_if_unsafe(url: str, allow_private_network: bool,
+                    allow_insecure_http: Optional[bool]) -> None:
+    """
+    Shared by HttpSink and OtlpSink's network_policy="warn" path: check the
+    destination once, emit NetworkGuardWarning if it fails, never raise.
+    """
+    try:
+        _netguard.check_destination(
+            url,
+            allow_private_network=allow_private_network,
+            allow_insecure_http=allow_insecure_http,
+        )
+    except _netguard.NetworkGuardError as exc:
+        _warnings.warn(str(exc), _netguard.NetworkGuardWarning, stacklevel=3)
 
 
 class HttpSink:
@@ -554,6 +573,11 @@ class HttpSink:
         if sink.failed > 0:
             logger.warning("HttpSink: %d trace deliveries failed", sink.failed)
 
+    Every request goes through the same outbound guard as OtlpSink and the
+    viewer's focus hook (see traceact._netguard): redirects are never
+    followed, and the destination is checked against
+    network_policy/allow_private_network/allow_insecure_http below.
+
     Args:
         url:
             The endpoint URL. Must accept POST requests with a JSON body
@@ -568,6 +592,26 @@ class HttpSink:
         timeout:
             Request timeout in seconds. Requests that exceed this are
             abandoned and counted as failures. Default: 5.0.
+
+        network_policy:
+            "warn" (default): a private-network or insecure-http destination
+            still delivers the same as before this guard existed — nothing
+            that works today stops working — but emits a NetworkGuardWarning
+            once, at construction, so it's visible. "enforce": the same check runs
+            before every write(); a destination that fails it is treated as
+            a delivery failure (counted in .failed, never attempted, never
+            raised) rather than a warning. "off": no check at all.
+
+        allow_private_network:
+            Permit a destination that resolves to a private, link-local,
+            reserved, multicast, or unspecified address. Loopback is always
+            permitted regardless of this flag. Default: False.
+
+        allow_insecure_http:
+            Permit plain http:// beyond the default loopback-only case. None
+            (default) allows http:// only to a loopback destination; True
+            allows it anywhere allow_private_network already permits; False
+            refuses http:// outright, even to loopback.
     """
 
     def __init__(
@@ -575,15 +619,34 @@ class HttpSink:
         url: str,
         headers: Optional[Dict[str, str]] = None,
         timeout: float = 5.0,
+        network_policy: str = "warn",
+        allow_private_network: bool = False,
+        allow_insecure_http: Optional[bool] = None,
     ) -> None:
+        if network_policy not in ("off", "warn", "enforce"):
+            raise ValueError(
+                f"network_policy must be 'off', 'warn', or 'enforce', got {network_policy!r}"
+            )
         self.url = url
         self.headers = headers or {}
         self.timeout = timeout
+        self.network_policy = network_policy
+        self.allow_private_network = allow_private_network
+        self.allow_insecure_http = allow_insecure_http
 
         # Count of write() calls that failed due to a network error, timeout,
         # or non-2xx response. Observable by choice, never silently hidden.
         self._failed = 0
         self._failed_lock = threading.Lock()
+
+        if network_policy == "warn":
+            # Checked once, at construction: the destination is fixed for
+            # this sink's lifetime, so re-warning on every write() would
+            # just be noise for a condition that never changes. "enforce"
+            # re-checks per write instead — see write() — since that mode
+            # exists specifically to catch a destination that stops being
+            # safe after construction (DNS rebinding).
+            _warn_if_unsafe(self.url, self.allow_private_network, self.allow_insecure_http)
 
     @property
     def failed(self) -> int:
@@ -596,9 +659,21 @@ class HttpSink:
         POST a single trace record to the configured URL.
 
         The body is a UTF-8 encoded JSON object. All errors (network failure,
-        timeout, non-2xx status) are caught; failures increment self.failed
+        timeout, non-2xx status, a blocked destination under
+        network_policy="enforce") are caught; failures increment self.failed
         rather than propagating to the caller or crashing an AsyncSink worker.
         """
+        if self.network_policy == "enforce":
+            try:
+                _netguard.check_destination(
+                    self.url,
+                    allow_private_network=self.allow_private_network,
+                    allow_insecure_http=self.allow_insecure_http,
+                )
+            except _netguard.NetworkGuardError:
+                self._record_failure()
+                return
+
         body = json.dumps(record, default=str).encode("utf-8")
         req = _urllib_request.Request(
             self.url,
@@ -611,14 +686,14 @@ class HttpSink:
             req.add_header(name, value)
 
         try:
-            with _urllib_request.urlopen(req, timeout=self.timeout) as resp:
+            with _netguard.open_guarded(req, timeout=self.timeout) as resp:
                 status = resp.status
             if status < 200 or status >= 300:
                 self._record_failure()
         except Exception:
             # Broad on purpose: connection refused, DNS failure, timeout, SSL
-            # errors, and anything unexpected from urlopen are all treated as
-            # delivery failures — counted, never re-raised.
+            # errors, a refused redirect, and anything unexpected are all
+            # treated as delivery failures — counted, never re-raised.
             self._record_failure()
 
     def _record_failure(self) -> None:
@@ -991,6 +1066,11 @@ class OtlpSink:
         if sink.failed > 0:
             logger.warning("OtlpSink: %d trace deliveries failed", sink.failed)
 
+    Every request goes through the same outbound guard as HttpSink and the
+    viewer's focus hook (see traceact._netguard): redirects are never
+    followed, and the destination is checked against
+    network_policy/allow_private_network/allow_insecure_http below.
+
     Args:
         endpoint:
             Base URL of the OTLP HTTP receiver, without a path. Traces are
@@ -1006,6 +1086,26 @@ class OtlpSink:
             Optional dict of OTel resource attributes added to every exported
             span (e.g. {"service.name": "my-app", "deployment.env": "prod"}).
             If omitted, ``service.name`` defaults to ``"traceact"``.
+
+        network_policy:
+            "warn" (default): a private-network or insecure-http endpoint
+            still delivers the same as before this guard existed, but emits
+            a NetworkGuardWarning once, at construction. "enforce": the same
+            check runs before every write(); a failing endpoint is treated as a delivery
+            failure (counted, never attempted, never raised). "off": no
+            check at all.
+
+        allow_private_network:
+            Permit an endpoint that resolves to a private, link-local,
+            reserved, multicast, or unspecified address. Loopback (e.g. the
+            "http://localhost:4318" example above) is always permitted
+            regardless of this flag. Default: False.
+
+        allow_insecure_http:
+            Permit plain http:// beyond the default loopback-only case. None
+            (default) allows http:// only to a loopback endpoint; True
+            allows it anywhere allow_private_network already permits; False
+            refuses http:// outright, even to loopback.
     """
 
     def __init__(
@@ -1014,11 +1114,21 @@ class OtlpSink:
         headers: Optional[Dict[str, str]] = None,
         timeout: float = 5.0,
         resource_attributes: Optional[Dict[str, str]] = None,
+        network_policy: str = "warn",
+        allow_private_network: bool = False,
+        allow_insecure_http: Optional[bool] = None,
     ) -> None:
+        if network_policy not in ("off", "warn", "enforce"):
+            raise ValueError(
+                f"network_policy must be 'off', 'warn', or 'enforce', got {network_policy!r}"
+            )
         # Normalise: strip trailing slash so we can always append /v1/traces.
         self.endpoint = endpoint.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
+        self.network_policy = network_policy
+        self.allow_private_network = allow_private_network
+        self.allow_insecure_http = allow_insecure_http
 
         # Build the OTel resource attribute list once — it's the same for
         # every span this sink exports.
@@ -1032,6 +1142,11 @@ class OtlpSink:
         # Observable by choice — never silently hidden.
         self._failed = 0
         self._failed_lock = threading.Lock()
+
+        if network_policy == "warn":
+            # Checked once, at construction — see HttpSink's identical
+            # comment for why "enforce" re-checks per write instead.
+            _warn_if_unsafe(self.endpoint, self.allow_private_network, self.allow_insecure_http)
 
     @property
     def failed(self) -> int:
@@ -1051,6 +1166,13 @@ class OtlpSink:
         kill an AsyncSink worker.
         """
         try:
+            if self.network_policy == "enforce":
+                _netguard.check_destination(
+                    self.endpoint,
+                    allow_private_network=self.allow_private_network,
+                    allow_insecure_http=self.allow_insecure_http,
+                )
+
             span = _to_otlp_span(record)
             payload = {
                 "resourceSpans": [{
@@ -1072,13 +1194,15 @@ class OtlpSink:
             for name, value in self.headers.items():
                 req.add_header(name, value)
 
-            with _urllib_request.urlopen(req, timeout=self.timeout) as resp:
+            with _netguard.open_guarded(req, timeout=self.timeout) as resp:
                 status = resp.status
             if status < 200 or status >= 300:
                 self._record_failure()
         except Exception:
             # Catches network errors, timeouts, JSON serialisation failures,
-            # and anything unexpected. All counted; none re-raised.
+            # a blocked destination under network_policy="enforce", a
+            # refused redirect, and anything unexpected. All counted; none
+            # re-raised.
             self._record_failure()
 
     def _record_failure(self) -> None:

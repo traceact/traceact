@@ -16,6 +16,9 @@
 #   GET  /api/query?source=&<field>[__op]=&limit=   search the full source via
 #        TraceLog, not just the live-tailed buffer (see _serve_query)
 #   GET  /api/export?source=<name>    the whole source as a .jsonl download
+#   GET  /api/cost?provider=&model=&tokens_in=&tokens_out=   estimated cost
+#        of one model call, priced via the optional rates package (see
+#        viewer/cost.py and _serve_cost)
 #   POST /api/focus                   forward a trace record to the focus hook
 #        (only on a server started with one — see _serve_focus)
 #
@@ -70,8 +73,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from traceact import __version__
+from traceact import __version__, _netguard
 from traceact.log import TraceLog
+from traceact.viewer import cost as _cost
 from traceact.viewer.reader import SourceReader
 
 # Directory where drag-dropped files are saved so they can be tailed.
@@ -140,6 +144,22 @@ _BASE_PATH_GLOBAL = "__TRACEACT_BASE__"
 # its own click, not the stream or any other request.
 _FOCUS_HOOK_TIMEOUT_SECONDS = 1.0
 
+# Default cap on a POST body read via _read_json_body — bounds how much a
+# single request can force into memory before it's even parsed. Matches
+# traceact-browser's own relay ingest cap (its MAX_BODY_BYTES), so the two
+# projects agree on one number for "a single JSON payload, generously sized."
+# A single trace record (/api/focus) or a source path (/api/sources) is
+# nowhere near this; a dropped .jsonl file (/api/import) can legitimately be
+# much larger, so that one call site raises the cap explicitly — see
+# _import_file.
+_MAX_BODY_BYTES = 8_000_000
+_MAX_BODY_BYTES_IMPORT = 200_000_000
+
+# Sentinel distinguishing "body too large" (413 already sent) from "no body"
+# / "malformed JSON" (both represented as None) — a caller must not treat
+# the two the same, or an oversized request reads as an ordinary 400.
+_BODY_TOO_LARGE = object()
+
 
 def _validate_focus_hook(url: Optional[str]) -> Optional[str]:
     """
@@ -159,6 +179,39 @@ def _validate_focus_hook(url: Optional[str]) -> Optional[str]:
             f"focus hook must be an http:// or https:// URL, got {url!r}"
         )
     return url
+
+
+def focus_hook_is_loopback(url: str) -> bool:
+    """
+    True if url's host resolves only to loopback addresses.
+
+    Used to decide whether to auto-enable token auth (see _run_view in
+    cli.py): a loopback hook (the common case — traceact-browser's relay,
+    an editor running on the same machine) leaves the viewer just as
+    open as it always was, but a hook pointed off-box means something
+    outside this machine now has a reason to reach the API, so the API
+    should stop being open to every other local process too.
+
+    Resolution failure is treated as "not loopback" — the safer default is
+    to require a token rather than assume an unresolvable destination is
+    safe.
+    """
+    import ipaddress
+
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        ipaddress.ip_address(host)
+        addresses: Any = frozenset([host])
+    except ValueError:
+        try:
+            addresses = _netguard.resolve_host(host, port)
+        except OSError:
+            return False
+    return bool(addresses) and all(_netguard.is_loopback(a) for a in addresses)
 
 
 def _normalise_base_path(base_path: Optional[str]) -> str:
@@ -335,6 +388,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_query(parse_qs(parsed.query))
         elif route == "/api/export":
             self._serve_export(parse_qs(parsed.query))
+        elif route == "/api/cost":
+            self._serve_cost(parse_qs(parsed.query))
         else:
             self._send_error(404, "Not found")
 
@@ -515,7 +570,57 @@ class _Handler(BaseHTTPRequestHandler):
             # reads this to decide whether to render Focus controls at all;
             # the hook URL itself stays server-side.
             "focus_hook": bool(getattr(self.server, "focus_hook", None)),
+            # Whether the optional rates package is installed, and so
+            # whether /api/cost can answer. The front-end renders cost
+            # estimates only when this is true.
+            "cost_estimates": _cost.rates_available(),
         })
+
+    # -- cost estimates ------------------------------------------------------
+
+    def _serve_cost(self, query: Dict[str, list]) -> None:
+        """
+        Price one model call: GET /api/cost?provider=&model=&tokens_in=&
+        tokens_out= → {"cost", "currency", "snapshot_date", ...}.
+
+        Answers 400 for missing or non-numeric params, 503 when rates isn't
+        installed (with the install command in the message), and 404 when
+        the provider+model pair has no usable price in the snapshot. The
+        registry loads once per process, from the bundled snapshot — this
+        endpoint never touches the network.
+        """
+        provider = _first(query.get("provider"))
+        model = _first(query.get("model"))
+        if not provider or not model:
+            self._send_json(400, {"error": "expected ?provider= and ?model="})
+            return
+        tokens_in = _to_int(_first(query.get("tokens_in")), default=-1)
+        tokens_out = _to_int(_first(query.get("tokens_out")), default=-1)
+        # Absent params default to 0 tokens; present-but-junk ones are an
+        # error. _to_int can't tell those apart, so check presence first.
+        if "tokens_in" not in query:
+            tokens_in = 0
+        if "tokens_out" not in query:
+            tokens_out = 0
+        if tokens_in < 0 or tokens_out < 0:
+            self._send_json(400, {
+                "error": "tokens_in and tokens_out must be whole numbers "
+                         "of tokens (0 or more)",
+            })
+            return
+
+        if not _cost.rates_available():
+            self._send_json(503, {
+                "error": "cost estimates are off — the rates package isn't "
+                         "installed. Run: pip install rates",
+            })
+            return
+        result = _cost.estimate(provider, model, tokens_in, tokens_out)
+        if not result["ok"]:
+            self._send_json(404, {"error": result["error"]})
+            return
+        del result["ok"]
+        self._send_json(200, result)
 
     # -- focus hook ----------------------------------------------------------
 
@@ -534,7 +639,8 @@ class _Handler(BaseHTTPRequestHandler):
         so nothing is cherry-picked or stripped here.
 
         Responses: 200 {"ok": true} when the hook answered 2xx; 502 with an
-        error message when it answered anything else or didn't answer within
+        error message when it answered anything else, refused a redirect
+        (see traceact._netguard), or didn't answer within
         _FOCUS_HOOK_TIMEOUT_SECONDS. The hook can never block the viewer
         beyond that timeout, and only on the requesting thread.
         """
@@ -544,6 +650,8 @@ class _Handler(BaseHTTPRequestHandler):
                                            "start the viewer with --focus-hook URL"})
             return
         record = self._read_json_body()
+        if record is _BODY_TOO_LARGE:
+            return  # 413 already sent
         if not isinstance(record, dict):
             self._send_json(400, {"error": "expected a JSON trace record"})
             return
@@ -553,7 +661,7 @@ class _Handler(BaseHTTPRequestHandler):
         req.add_header("Content-Type", "application/json")
         req.add_header("Content-Length", str(len(body)))
         try:
-            with urllib.request.urlopen(
+            with _netguard.open_guarded(
                 req, timeout=_FOCUS_HOOK_TIMEOUT_SECONDS
             ) as resp:
                 status = resp.status
@@ -601,7 +709,12 @@ class _Handler(BaseHTTPRequestHandler):
     # -- drag-drop import --------------------------------------------------
 
     def _import_file(self) -> None:
-        body = self._read_json_body()
+        # A dropped .jsonl file's content is the whole body, unlike every
+        # other POST endpoint here — a long-running local trace log can
+        # legitimately be well past the default cap.
+        body = self._read_json_body(max_bytes=_MAX_BODY_BYTES_IMPORT)
+        if body is _BODY_TOO_LARGE:
+            return  # 413 already sent
         if body is None or "content" not in body or "name" not in body:
             self._send_json(400, {"error": "expected {name, content}"})
             return
@@ -647,6 +760,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _add_source(self) -> None:
         body = self._read_json_body()
+        if body is _BODY_TOO_LARGE:
+            return  # 413 already sent
         if body is None or "path" not in body:
             self._send_json(400, {"error": "expected JSON body with a 'path'"})
             return
@@ -760,10 +875,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- small response helpers -------------------------------------------
 
-    def _read_json_body(self) -> Optional[dict]:
+    def _read_json_body(self, max_bytes: int = _MAX_BODY_BYTES) -> Any:
+        """
+        Read and parse a JSON request body, capped at max_bytes.
+
+        Returns the parsed value, None for no body or malformed JSON, or the
+        _BODY_TOO_LARGE sentinel — with a 413 already sent — when
+        Content-Length exceeds max_bytes. A caller must check for the
+        sentinel before treating None-or-falsy as "no body"; every current
+        caller does (see _serve_focus, _import_file, _add_source).
+        """
         length = _to_int(self.headers.get("Content-Length"), default=0)
         if length <= 0:
             return None
+        if length > max_bytes:
+            self._send_json(413, {
+                "error": f"request body of {length} bytes exceeds the "
+                         f"{max_bytes}-byte limit for this endpoint",
+            })
+            return _BODY_TOO_LARGE
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
@@ -806,6 +936,20 @@ class ViewerServer(ThreadingHTTPServer):
         self.focus_hook = _validate_focus_hook(focus_hook)
         super().__init__((host, port), _Handler)
         self.state = state
+
+    def handle_error(self, request, client_address) -> None:
+        """
+        Suppress the traceback ThreadingHTTPServer prints when a client
+        drops its connection mid-request — a page closed during an SSE
+        stream, or an upload abandoned when the server answers (say, a 413)
+        before the client finishes sending. Routine disconnects, not server
+        faults. Everything else keeps the parent's traceback.
+        """
+        import sys as _sys
+        exc = _sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 # ---------------------------------------------------------------------------

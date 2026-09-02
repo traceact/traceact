@@ -9,12 +9,14 @@ def test_no_source_reports_ok_with_info_only_checks():
 
     assert result["ok"] is True
     labels = [c["label"] for c in result["checks"]]
-    assert labels == ["python_version", "traceact_version", "state_dir", "viewer_running"]
+    assert labels == ["python_version", "traceact_version", "cost_estimates",
+                      "state_dir", "viewer_running"]
     # python_version and state_dir are expected to pass on any machine running
-    # this test; the other two are purely informational.
+    # this test; the others are purely informational.
     by_label = {c["label"]: c for c in result["checks"]}
     assert by_label["python_version"]["status"] == "pass"
     assert by_label["traceact_version"]["status"] == "info"
+    assert by_label["cost_estimates"]["status"] == "info"
     assert by_label["state_dir"]["status"] == "pass"
     assert by_label["viewer_running"]["status"] == "info"
 

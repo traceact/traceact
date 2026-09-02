@@ -235,14 +235,27 @@ def launch_or_connect(
     the spawned CLI validates it and refuses anything else. Like the two
     settings above, it only takes effect on the launch that spawns a
     server; a viewer already running keeps the hook setting (and URL) it
-    started with.
+    started with. A non-loopback hook turns ``require_token`` on
+    automatically, the same rule the CLI applies (see USAGE.md's Focus hook
+    section) — the returned URL then carries the token like any tokened
+    launch.
     """
+    import re
     import subprocess
     import sys
+    import threading
     import time
 
-    from traceact.viewer.server import _normalise_base_path
+    from traceact.viewer.server import _normalise_base_path, focus_hook_is_loopback
     base_path = _normalise_base_path(base_path)
+
+    # Mirror the CLI's rule here so this caller knows a token is coming: the
+    # spawned CLI auto-enables token auth for a non-loopback hook whether or
+    # not the flag is passed, and a caller that didn't expect that would
+    # poll /api/health untokened (403 every time), wait out the whole
+    # timeout, and hand back a URL the page can't use.
+    if focus_hook and not require_token:
+        require_token = not focus_hook_is_loopback(focus_hook)
 
     existing = find_running()
     if existing is not None:
@@ -261,8 +274,11 @@ def launch_or_connect(
     # Not running — start one in the background. A source is seeded on the
     # command line only when no explicit name was given: the CLI path derives
     # its own name, so a named source is added over HTTP once the server is up.
-    cmd = [sys.executable, "-m", "traceact.viewer.cli", "view", "--no-browser",
-           "--host", host, "--port", str(port)]
+    # -u because a tokened spawn's stdout is read through a pipe (below), and
+    # a pipe is block-buffered by default — the startup URL this caller needs
+    # would sit in the child's buffer instead of arriving.
+    cmd = [sys.executable, "-u", "-m", "traceact.viewer.cli", "view",
+           "--no-browser", "--host", host, "--port", str(port)]
     if base_path:
         cmd += ["--base-path", base_path]
     if require_token:
@@ -271,12 +287,46 @@ def launch_or_connect(
         cmd += ["--focus-hook", focus_hook]
     if source is not None and name is None:
         cmd.append(source)
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # A tokened spawn's stdout is captured so the token can be read from the
+    # startup URL the CLI prints. The state file is the primary channel, but
+    # a CLI given an explicit non-default --port deliberately stays out of
+    # the state file (it would capture the shared-viewer slot) — the printed
+    # URL is then the only place the token exists, and a pipe is a same-user
+    # channel, the same as the state file. An untokened spawn keeps the
+    # original fire-and-forget shape.
+    spawned_lines: list = []
+
+    def _drain(stream: Any) -> None:
+        # Reads until the spawned viewer exits (EOF), then closes the pipe —
+        # without the close, the wrapper is finalised unclosed at interpreter
+        # shutdown and warns. The read end stays open for the child's whole
+        # lifetime on purpose: closing it early would turn any later print in
+        # the child into a BrokenPipeError inside the running viewer.
+        try:
+            for line in stream:
+                spawned_lines.append(line)
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    if require_token:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        stream = getattr(proc, "stdout", None)
+        if stream is not None:
+            threading.Thread(target=_drain, args=(stream,), daemon=True).start()
+    else:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
 
     # Wait for it to be ready (polls health endpoint). A tokened viewer's
     # health check refuses an unauthenticated probe, so the token has to be
-    # picked up from the state file — written by the spawned process — before
-    # the probe can succeed.
+    # picked up — from the state file when the spawned process wrote one,
+    # else from the URL it printed — before the probe can succeed.
+    token_in_url = re.compile(r"[?&]token=([A-Za-z0-9_\-]+)")
     token: Optional[str] = None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -284,6 +334,12 @@ def launch_or_connect(
             recorded = _read_state() or {}
             if recorded.get("host") == host and recorded.get("port") == port:
                 token = recorded.get("token")
+            if token is None:
+                for line in list(spawned_lines):
+                    found = token_in_url.search(line)
+                    if found:
+                        token = found.group(1)
+                        break
         if probe(host, port, base_path=base_path, token=token) is not None:
             break
         time.sleep(0.1)

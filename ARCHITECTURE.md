@@ -65,7 +65,7 @@ flowchart LR
 
     subgraph server ["ViewerServer (stdlib ThreadingHTTPServer)"]
         gate["Token gate (opt-in)<br/>every /api/* route"]
-        routes["Routes<br/>/ static · /api/health · /api/sources ·<br/>/api/stream SSE · /api/query · /api/export ·<br/>/api/doctor · /api/pick · /api/import · /api/focus"]
+        routes["Routes<br/>/ static · /api/health · /api/sources ·<br/>/api/stream SSE · /api/query · /api/export ·<br/>/api/doctor · /api/pick · /api/import ·<br/>/api/focus · /api/cost"]
         state["ViewerState<br/>registered sources, names"]
         reader["SourceReader<br/>snapshot + byte-offset tail,<br/>inode change detection, in-flight dedupe"]
     end
@@ -109,11 +109,29 @@ Coordination contracts:
   when the boolean is true; a click POSTs the full record to the server's
   own `POST /api/focus`, which forwards it to the hook URL — server-side,
   so a hook consumer needs no CORS handling and the URL never reaches the
-  page. Non-2xx or no answer within ~1s comes back as `502` and surfaces
-  as a brief notice; the forward runs on the request's own thread, so a
-  slow hook delays only its own click. Unknown record fields pass through
-  the whole chain (file → reader → SSE → page → hook) untouched — hook
-  consumers depend on fields traceact doesn't define.
+  page. Non-2xx, a refused redirect, or no answer within ~1s comes back as
+  `502` and surfaces as a brief notice; the forward runs on the request's
+  own thread, so a slow hook delays only its own click. Unknown record
+  fields pass through the whole chain (file → reader → SSE → page → hook)
+  untouched — hook consumers depend on fields traceact doesn't define. A
+  non-loopback hook auto-enables the token gate above. See Security
+  considerations below for the outbound guard this route shares with
+  `HttpSink`/`OtlpSink`.
+- **Cost estimates**: `GET /api/cost` prices one model call via the optional
+  rates package (`viewer/cost.py`). Display-time only — capture-time
+  stamping was considered and rejected, because a stamped cost freezes
+  whatever price snapshot happened to be installed when the trace was
+  written and would put a dependency on the recording path. The price
+  registry loads once per process from rates' bundled snapshot (never the
+  network), `/api/health` advertises availability as `cost_estimates`, and
+  the page renders cost UI only when it's true. The provider must come from
+  the event itself: one model id is sold by many providers at different
+  prices, so an event without one gets a hint, never a guessed number.
+  rates traces its own loads with traceact, so the viewer CLI — as the
+  process's app — routes package tracing to a capped
+  `~/.traceact/viewer-traces.jsonl` at startup, only when nothing else
+  configured a sink first; embedded servers leave the host app's
+  configuration untouched.
 
 ## Component contracts
 
@@ -129,7 +147,58 @@ Coordination contracts:
 | `viewer/server.py` | HTTP surface | All routes under one handler; token and base-path checks before dispatch |
 | `viewer/reader.py` — `SourceReader` | Snapshot + live tail (JSONL and SQLite) | Byte offsets per file / autoincrement-id cursor per database; a changed inode, a changed first-bytes fingerprint (inode numbers get reused, routinely on Linux), or a reset id sequence all force a full re-snapshot; last-wins in-flight dedupe; SQLite reads are read-only with a 0.5s timeout |
 | `viewer/instance.py` | Single-instance coordination, `launch_or_connect()` | State-file probe before reuse; running instance's base path and token win |
+| `viewer/cost.py` | Cost estimates for model events via the optional rates package | rates imported lazily, on the first estimate; registry loaded once, bundled snapshot only; never touches traceact's global configuration; ambiguous or unknown provider+model pairs refused, never guessed |
 | `integrations/` | Optional framework adapters | Import their framework only when imported themselves; `import traceact` stays zero-dependency; adapter callbacks never raise into the host |
+
+This table carries the components whose contracts constrain extensions; the
+complete per-file map, small support modules included, is
+[MANIFEST.md](https://github.com/traceact/traceact/blob/main/MANIFEST.md).
+
+## Security considerations
+
+`traceact._netguard` is the one outbound-network guard shared by every place
+TraceAct makes an HTTP(S) call on the caller's behalf: `HttpSink`,
+`OtlpSink`, and the viewer's `POST /api/focus` forward. One implementation,
+so a change to the policy fixes all three instead of drifting apart.
+
+- **Redirects are never followed**, on any of the three paths — a validated
+  destination that answers with a redirect elsewhere bypasses whatever check
+  just ran on the original URL, so nothing chases one.
+- **Destination classification**: a hostname resolving to any private,
+  link-local, reserved, multicast, or unspecified address is rejected
+  unless the caller opts in (`allow_private_network=True`). Loopback is
+  always permitted — it's the machine TraceAct itself runs on, and the
+  common case (a local collector, the `traceact-browser` relay). A hostname
+  with even one such answer among several resolved addresses is rejected
+  outright, narrowing a DNS-rebinding path where a caller who controls DNS
+  alternates between a public answer (seen at the check) and a private one
+  (used by whichever address ends up connecting). Narrowing, not closing:
+  the check classifies the addresses resolved at check time, and the
+  connection itself resolves again, so a window remains between check and
+  connect. `network_policy="enforce"` re-checks before every write to keep
+  that window as small as the current design allows; pinning the socket to
+  the checked address would close it and is a candidate for a later pass.
+- **Plain `http://` is loopback-only by default**; `allow_insecure_http`
+  widens or narrows that.
+- **`HttpSink`/`OtlpSink` default to `network_policy="warn"`**: an unsafe
+  destination still delivers the same as before this guard existed —
+  nothing that worked stops working — but emits a warning once, at
+  construction. `network_policy="enforce"` re-checks before every write and
+  turns a blocked destination into an ordinary counted delivery failure,
+  never an attempted connection. The focus hook forward refuses redirects
+  unconditionally (it's new surface with no prior deployments to keep
+  compatible), but doesn't gate the destination itself beyond the existing
+  http(s)-only validation — passing `--focus-hook` at all is explicit
+  operator consent to that URL.
+- **Request bodies are capped** on every POST route (`/api/focus`,
+  `/api/sources`, `/api/import`) — `Content-Length` past the limit gets
+  `413` before the body is read into memory. `/api/import` carries a
+  dropped `.jsonl` file's whole content, so it raises the cap well past the
+  other two routes' single-record/single-path payloads.
+- **A non-loopback focus hook auto-enables the token gate** (see Viewer
+  above) even without `--require-token` — a hook pointed off this machine
+  gives the API a reason to be reached from somewhere other than "whatever
+  runs locally."
 
 ## Event vocabulary
 

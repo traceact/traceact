@@ -17,6 +17,7 @@ import json
 import socket
 import threading
 import time
+import unittest.mock as mock
 import urllib.error
 import urllib.request
 
@@ -404,6 +405,277 @@ class TestCliFocusHook:
 
         instance.launch_or_connect(port=59998, timeout=0.2)
         assert "--focus-hook" not in spawned["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# Request body cap
+# ---------------------------------------------------------------------------
+
+class TestFocusBodyCap:
+    def test_oversized_body_is_rejected_and_nothing_is_forwarded(self):
+        # The server answers 413 without ever reading the oversized body
+        # into memory — which means it can respond before the client has
+        # finished sending several MB over the same socket, and some
+        # clients (including urllib, observed here) see a connection reset
+        # rather than a fully parsed 413. Either outcome is correct: the
+        # point is that nothing this large ever reaches the hook. The payload
+        # is otherwise a valid, forwardable trace record (padded with a
+        # large field) — a malformed body would 400 regardless of the size
+        # cap, which would leave this test unable to tell "the cap worked"
+        # from "the cap doesn't exist and the shape check caught it anyway".
+        hook_url, received, stop_hook = _start_hook()
+        url, _state, shutdown = _serve(focus_hook=hook_url)
+        try:
+            from traceact.viewer.server import _MAX_BODY_BYTES
+            padded = {**_RECORD, "padding": "x" * (_MAX_BODY_BYTES + 1)}
+            try:
+                status, body = _post(f"{url}/api/focus", padded)
+                assert status == 413
+                assert "byte" in body["error"]
+            except (urllib.error.URLError, ConnectionError):
+                pass  # connection reset before the response was read — acceptable
+            assert received == []
+        finally:
+            shutdown()
+            stop_hook()
+
+    def test_body_at_the_limit_is_not_rejected_for_size(self):
+        # Right at the cap: not a size rejection (may still 400 on shape,
+        # since this payload isn't a JSON object — the point is it gets past
+        # the size gate to that check at all).
+        hook_url, _received, stop_hook = _start_hook()
+        url, _state, shutdown = _serve(focus_hook=hook_url)
+        try:
+            from traceact.viewer.server import _MAX_BODY_BYTES
+            at_limit = b'"' + b"x" * (_MAX_BODY_BYTES - 2) + b'"'  # valid JSON string
+            status, body = _post(f"{url}/api/focus", None, raw=at_limit)
+            assert status == 400  # a JSON string, not an object — shape rejection
+            assert "byte" not in body["error"]
+        finally:
+            shutdown()
+            stop_hook()
+
+
+# ---------------------------------------------------------------------------
+# Redirect refusal
+# ---------------------------------------------------------------------------
+
+def _start_capturing_server_any_method():
+    """
+    A local server recording every request it receives, by method — unlike
+    _start_hook (POST-only), this also implements do_GET. A refused 302
+    after a POST is only provably un-followed if a *converted-to-GET*
+    redirect (urllib's default behavior for 301/302/303 after POST) would
+    also have been caught here; a POST-only handler would silently 501 an
+    incoming GET and this test would pass whether the redirect was refused
+    or was simply followed to an endpoint that doesn't speak GET.
+    """
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _record(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            hits.append(self.command)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            self._record()
+
+        def do_POST(self):
+            self._record()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def shutdown():
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    return f"http://127.0.0.1:{port}/elsewhere", hits, shutdown
+
+
+class TestFocusRedirectRefusal:
+    def test_hook_redirect_is_not_followed(self):
+        # The redirect *target* — if the hook were followed (as a POST, or
+        # as a GET, which is what urllib's default redirect handling does
+        # to a 301/302/303 after a POST), this records the hit; it must not.
+        target_url, target_hits, stop_target = _start_capturing_server_any_method()
+
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(302)
+                self.send_header("Location", target_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        redirect_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_port = redirect_server.server_address[1]
+        redirect_thread = threading.Thread(target=redirect_server.serve_forever, daemon=True)
+        redirect_thread.start()
+        hook_url = f"http://127.0.0.1:{redirect_port}/"
+
+        url, _state, shutdown = _serve(focus_hook=hook_url)
+        try:
+            status, body = _post(f"{url}/api/focus", _RECORD)
+            # The refused redirect surfaces as a delivery failure, same as
+            # any other hook problem — never followed to the target.
+            assert status == 502
+            assert body["ok"] is False
+            assert "302" in body["error"]
+            assert target_hits == []
+        finally:
+            shutdown()
+            redirect_server.shutdown()
+            redirect_server.server_close()
+            redirect_thread.join(timeout=2)
+            stop_target()
+
+
+# ---------------------------------------------------------------------------
+# Auto-enabled token auth for a non-loopback focus hook
+# ---------------------------------------------------------------------------
+
+class TestAutoTokenOnNonLoopbackFocusHook:
+    def _run_view(self, argv, monkeypatch):
+        from traceact.viewer import cli
+
+        captured = {}
+        fake_server = mock.MagicMock()
+        fake_server.serve_forever.side_effect = lambda: None
+
+        def fake_start(h, p, s, base_path="", token=None, focus_hook=None):
+            captured["token"] = token
+            captured["focus_hook"] = focus_hook
+            return fake_server, p
+
+        monkeypatch.setattr(cli, "_start_server", fake_start)
+        monkeypatch.setattr(cli._instance, "write_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "clear_state", mock.MagicMock())
+        monkeypatch.setattr(cli._instance, "find_running", lambda: None)
+
+        parser = cli._build_parser()
+        rc = cli._run_view(parser.parse_args(argv))
+        return rc, captured
+
+    def test_loopback_hook_does_not_auto_enable_token(self, monkeypatch):
+        rc, captured = self._run_view(
+            ["view", "--no-browser", "--focus-hook", "http://127.0.0.1:9999/focus"],
+            monkeypatch,
+        )
+        assert rc == 0
+        assert captured["token"] is None
+
+    def test_nonloopback_hook_auto_enables_token(self, monkeypatch, capsys):
+        # An IP literal needs no DNS — deterministic without mocking.
+        rc, captured = self._run_view(
+            ["view", "--no-browser", "--focus-hook", "http://93.184.216.34:9999/focus"],
+            monkeypatch,
+        )
+        assert rc == 0
+        token = captured["token"]
+        assert token and len(token) >= 24
+        assert "token auth is on automatically" in capsys.readouterr().err
+
+    def test_explicit_require_token_silences_the_auto_note(self, monkeypatch, capsys):
+        rc, captured = self._run_view(
+            ["view", "--no-browser", "--require-token",
+             "--focus-hook", "http://93.184.216.34:9999/focus"],
+            monkeypatch,
+        )
+        assert rc == 0
+        assert captured["token"] is not None
+        assert "automatically" not in capsys.readouterr().err
+
+    def test_no_focus_hook_no_auto_token(self, monkeypatch):
+        rc, captured = self._run_view(["view", "--no-browser"], monkeypatch)
+        assert rc == 0
+        assert captured["token"] is None
+
+
+class TestLaunchOrConnectAutoToken:
+    def test_spawn_command_carries_require_token_for_nonloopback_hook(
+        self, monkeypatch
+    ):
+        # launch_or_connect must mirror the CLI's non-loopback rule and pass
+        # the flag explicitly, so its own wait loop knows a token is coming.
+        spawned = {}
+
+        def fake_popen(cmd, **kwargs):
+            spawned["cmd"] = cmd
+
+        monkeypatch.setattr(instance, "find_running", lambda: None)
+        import subprocess as _subprocess
+        monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(instance, "probe", lambda *a, **k: {"status": "ok"})
+
+        instance.launch_or_connect(
+            port=59997, focus_hook="http://93.184.216.34:9/focus", timeout=0.2,
+        )
+        assert "--require-token" in spawned["cmd"]
+
+    def test_loopback_hook_spawn_stays_untokened(self, monkeypatch):
+        spawned = {}
+
+        def fake_popen(cmd, **kwargs):
+            spawned["cmd"] = cmd
+
+        monkeypatch.setattr(instance, "find_running", lambda: None)
+        import subprocess as _subprocess
+        monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(instance, "probe", lambda *a, **k: {"status": "ok"})
+
+        instance.launch_or_connect(
+            port=59996, focus_hook="http://127.0.0.1:9/focus", timeout=0.2,
+        )
+        assert "--require-token" not in spawned["cmd"]
+
+    def test_live_nonloopback_hook_returns_usable_tokened_url(
+        self, tmp_path, monkeypatch
+    ):
+        # End to end against a really spawned viewer: the URL must carry the
+        # token, and that token must authenticate against the running API.
+        # A custom port keeps the spawned CLI out of the shared state file,
+        # which is the one case where the token can only arrive via the
+        # CLI's own printed URL.
+        monkeypatch.setattr(instance, "_STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(instance, "_STATE_FILE",
+                            str(tmp_path / "viewer.json"))
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        try:
+            url = instance.launch_or_connect(
+                port=port,
+                focus_hook="http://93.184.216.34:9/focus",
+                timeout=10.0,
+            )
+            assert f":{port}" in url
+            assert "token=" in url
+            from urllib.parse import parse_qs, urlparse
+            token = parse_qs(urlparse(url).query)["token"][0]
+            health = instance.probe("127.0.0.1", port, token=token)
+            assert health is not None and health.get("focus_hook") is True
+        finally:
+            import subprocess as _subprocess
+            # No leading dashes in the pattern: pkill would read them as its
+            # own options. "port <n>" still matches the spawned command line.
+            _subprocess.run(["pkill", "-f", f"port {port}"],
+                            capture_output=True)
 
 
 if __name__ == "__main__":

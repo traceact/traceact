@@ -45,6 +45,14 @@
 #                   counted in OtlpSink.failed. Always wrap in AsyncSink
 #                   for production use.
 #
+#   NetworkGuardError / NetworkGuardWarning — the outbound network guard's
+#                   error and warning types (see traceact/_netguard.py).
+#                   The warning is what the sinks' warn mode emits, so it
+#                   can be filtered or escalated (warnings.filterwarnings);
+#                   the error is the guard's exception type, public as the
+#                   stable name for guard failures (the sinks handle it
+#                   internally — blocked deliveries count in .failed).
+#
 #   REDACTION_PRESETS — named groups of extra redaction patterns; pass their
 #                   names to TraceConfig(redaction_presets=[...]).
 #
@@ -77,7 +85,7 @@
 #   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
 #                   above for async frameworks.
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
@@ -85,6 +93,7 @@ from traceact.trace import ActionTrace
 from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
 from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink, OtlpSink
+from traceact._netguard import NetworkGuardError, NetworkGuardWarning
 from traceact.log import TraceLog
 from traceact.propagation import (
     propagate,
@@ -109,6 +118,8 @@ __all__ = [
     "SqliteSink",
     "HttpSink",
     "OtlpSink",
+    "NetworkGuardError",
+    "NetworkGuardWarning",
     "REDACTION_PRESETS",
     "TraceLog",
     "propagate",

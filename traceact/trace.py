@@ -1486,8 +1486,8 @@ class ActionTrace(TraceHelpersMixin):
         """
         Serialise the trace to a plain Python dict suitable for JSON output.
 
-        This is the canonical trace record shape. It matches the example in
-        PRD section 43.
+        This is the canonical trace record shape — the one documented in
+        USAGE.md's "Trace record schema" section.
         """
         return {
             "trace_id": self.trace_id,
