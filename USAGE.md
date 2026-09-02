@@ -1688,8 +1688,47 @@ The Terminal window stays open so Ctrl+C stops the viewer. To pass a source file
 - **Trace log** — a live, newest-first table of traces (time, action, status, duration, and touch/error/budget counts). A search box filters by action, kind, status, correlation ID, or touched target, against the currently tailed rows. The row count is capped (25 / 50 / 100 / 250, default 100) and paired with live tailing, so the newest traces are always in view. A pre-filtered view opened via `TraceLog.view()` instead searches the full source on disk — see [Server-side search](#server-side-search-apiquery) below.
 - **Trace inspector** — selecting a trace shows its own ID, its parent and root trace IDs (when it's a child trace), correlation ID (when present, shown in full), kind, duration, and touch/error counts. "Copy JSON" copies the full record.
 - **Trace map** — a visual of one trace: the action as origin, its events and resources as connected nodes, with per-node status and a red marker on failures. Plays as a sequential step-through replay, with a speed slider (1×–10×, live, persisted) and pause/play. The map zooms and pans: the mouse wheel zooms about the cursor, left-drag pans, and the `+` / `−` / `⟲` buttons zoom about the centre and reset to 1×. Zoom is clamped to 0.2×–5× and resets when you select a different trace.
+- **Timeline** — one trace's events as horizontal bars on the trace's own clock, colored by kind, with failures marked, steps as tick marks, and a measurement strip above the chart. See [Timeline](#timeline) below.
 - **Source export** — each source row in the source picker shows a `⤓` button on hover. Clicking it downloads the full source as a `.jsonl` file via `/api/export`. The download is a snapshot as of the moment the request is made; traces written after it aren't included.
 - **Settings** — accent colour, display density, default trace view, row count, default replay speed, and a **Run diagnostics** button — all persisted to `localStorage` except diagnostics, which runs fresh each time.
+
+### Timeline
+
+The Timeline tab draws one trace's events as horizontal bars on the trace's own clock, oldest at the top. Bars are colored by event kind; a failed event's bar and label are marked in red; steps appear as tick marks on a rail above the rows, each showing its label on hover. `?view=timeline` in the viewer URL opens the tab directly, the same way `?view=map` opens the map.
+
+How a bar is placed: events are recorded when they finish, so an event's recorded timestamp is the bar's **right** edge and the bar reaches back `duration_ms` from there. An event recorded without a usable `duration_ms` renders as a diamond at its recorded time instead of a bar.
+
+Above the chart, a measurement strip:
+
+| Measurement | Meaning |
+|---|---|
+| Wall-clock | The trace's own `duration_ms` — start to finish |
+| Summed event time | The sum of every event's `duration_ms` |
+| Overlap saved | Summed event time minus the union of the event intervals — time two or more events shared instead of running back to back; 0 for fully sequential traces |
+| Max concurrency | The highest number of events in flight at once |
+| Longest event | The single largest `duration_ms`, named |
+
+These are measurements, not verdicts — the strip reports what happened and leaves whether it's a problem to you. Events without a `duration_ms` stay out of all four duration-based numbers, and the strip says how many were counted (`3 of 4 events carry duration_ms; ...`) so partial data never reads as complete. The view derives everything from fields trace records already carry, so traces recorded before this tab existed draw the same as new ones.
+
+### Retries: the attempt convention
+
+A retried operation records one event per try, each with two extra kwargs:
+
+```python
+trace.model(operation="completion", target="claude-sonnet-5",
+            status="failed", duration_ms=512,
+            attempt=1, attempt_reason="rate limited")
+trace.model(operation="completion", target="claude-sonnet-5",
+            duration_ms=640, tokens_in=800, tokens_out=220,
+            provider="anthropic", attempt=2)
+```
+
+- **`attempt`** — a 1-based integer numbering the try.
+- **`attempt_reason`** — optional, a short string saying why this try happened (what the previous one hit).
+
+These are ordinary extra kwargs stored on the event dict; nothing else in the record changes, and events without `attempt` are unaffected. The viewer groups at display time: consecutive events that carry attempt numbers, share `kind` + `operation` + `target`, and count strictly upward render in the inspector as one sequence — per-attempt status lines with their reasons, closed by `attempt 2 of 2 succeeded` (or `all N attempts failed`) — and collapse on the trace map into a single node marked `×N`. A repeated or lower attempt number starts a new sequence, so two retry loops against the same target stay two sequences. On the timeline, each attempt keeps its own bar, labeled `(attempt n)`.
+
+Each attempt keeps its own [cost estimate](#cost-estimates) too: a retried model call bills every try, and the trace's summed estimate counts them all.
 
 ### Cost estimates
 

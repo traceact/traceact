@@ -65,6 +65,8 @@ traceact view data/traces.jsonl
 
 This starts a server at `http://127.0.0.1:8765` and opens your browser. The viewer tails the file live: traces appear as your app writes them.
 
+Three views of a trace: the **log** (live table), the **map** (events and resources as connected nodes, played as a replay), and the **timeline** (events as bars on the trace's own clock, with wall-clock, summed event time, overlap saved, max concurrency, and the longest event measured above the chart). Retried operations recorded with `attempt=1, 2, ...` render as one sequence in the inspector and one `×N` node on the map — details in [USAGE.md's Timeline](https://github.com/traceact/traceact/blob/main/USAGE.md#timeline).
+
 ### See it in the map
 
 `--map` opens the browser straight onto the animated trace map for the newest trace, instead of the log. Save this as `demo.py`:

@@ -969,4 +969,56 @@ body {
 .doctor-summary.ok { color: var(--status-completed); }
 .doctor-summary.fail { color: var(--status-failed); }
 
+/* ---- Timeline --------------------------------------------------------- */
+
+.timeline-wrap {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  min-height: 200px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.timeline-measures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 24px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.tl-measure { color: var(--text); }
+.tl-measure-label {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  margin-right: 8px;
+}
+.tl-note {
+  flex-basis: 100%;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.tl-grid { stroke: var(--border); stroke-width: 1; }
+.tl-axis-label { fill: var(--text-faint); font-size: 10px; }
+.tl-step { stroke: var(--status-completed); stroke-width: 2; }
+.tl-label { fill: var(--text-dim); font-size: 11px; }
+.tl-label.failed { fill: var(--status-failed); }
+.tl-bar.failed { stroke: var(--status-failed); stroke-width: 1.5; }
+.tl-instant.failed { stroke: var(--status-failed); stroke-width: 1.5; }
+.tl-dur { fill: var(--text-faint); font-size: 10px; }
+
+/* ---- Attempt sequences in the inspector ------------------------------- */
+
+.insp-attempt {
+  color: var(--text-faint);
+  font-size: 11px;
+  padding-left: 14px;
+}
+.insp-attempt.failed { color: var(--status-failed); }
+.attempt-count { color: var(--text-faint); font-size: 11px; }
+.attempt-closing { padding-left: 14px; }
+
 [hidden] { display: none !important; }

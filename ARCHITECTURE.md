@@ -70,7 +70,7 @@ flowchart LR
         reader["SourceReader<br/>snapshot + byte-offset tail,<br/>inode change detection, in-flight dedupe"]
     end
 
-    browser["Browser SPA<br/>static/app.js — log, inspector, map replay"]
+    browser["Browser SPA<br/>static/app.js — log, inspector, map replay, timeline"]
     statefile["~/.traceact/viewer.json<br/>host, port, base_path, token (0600)"]
     apps["Other apps<br/>launch_or_connect()"]
 

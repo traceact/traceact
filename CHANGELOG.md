@@ -2,6 +2,13 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.3.0] — 2026-09-02
+
+### Added
+
+- **Timeline view.** A third viewer tab drawing one trace's events as horizontal bars on the trace's own clock — colored by kind, failures marked, steps as tick marks — with a measurement strip above the chart: wall-clock, summed event time, overlap saved (summed minus the union of the event intervals), max concurrency, and the longest event. Events without a `duration_ms` render as instants and stay out of the sums, and the strip says how many were counted. `?view=timeline` opens the tab directly, and Settings' default trace view gains a Timeline choice. Everything derives from fields trace records already carry, so existing files draw without change. See [Timeline](https://github.com/traceact/traceact/blob/main/USAGE.md#timeline) in USAGE.md.
+- **The attempt convention.** A retried operation records one event per try with `attempt=` (a 1-based int) and optionally `attempt_reason=` as ordinary extra kwargs. The viewer groups at display time: consecutive events sharing kind + operation + target with strictly increasing attempt numbers render in the inspector as one sequence — per-attempt status and reason lines, closed by `attempt 2 of 2 succeeded` or `all N attempts failed` — and collapse on the trace map into a single `×N` node. Each attempt keeps its own bar on the timeline and its own cost estimate. Nothing is stamped into the records. See [Retries: the attempt convention](https://github.com/traceact/traceact/blob/main/USAGE.md#retries-the-attempt-convention) in USAGE.md.
+
 ## [1.2.0] — 2026-09-02
 
 ### Added

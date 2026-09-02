@@ -59,6 +59,7 @@
         <div class="tabs">
           <button data-tab="log" class="active">Trace log</button>
           <button data-tab="map">Trace map</button>
+          <button data-tab="timeline">Timeline</button>
         </div>
       </header>
 
@@ -113,6 +114,18 @@
             </div>
             <div class="map-wrap" id="map-wrap"></div>
           </div>
+
+          <!-- Timeline tab: every event as a bar on the trace's own clock,
+               steps as ticks, and a measurement strip above the chart.
+               Measurements only — the numbers say what happened; whether it
+               was fast enough is the reader's call. -->
+          <div id="view-timeline" hidden>
+            <div class="map-toolbar">
+              <span class="map-caption" id="timeline-caption">SELECT A TRACE</span>
+            </div>
+            <div class="timeline-measures" id="timeline-measures" hidden></div>
+            <div class="timeline-wrap" id="timeline-wrap"></div>
+          </div>
         </div>
 
         <!-- Inspector -->
@@ -155,6 +168,7 @@
         <div class="choice-group" data-setting="defaultView">
           <button class="choice active" data-value="log">Trace log</button>
           <button class="choice" data-value="map">Trace map</button>
+          <button class="choice" data-value="timeline">Timeline</button>
         </div>
       </div>
 

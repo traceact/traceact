@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-02 10:34:32 UTC
+Last updated: 2026-09-02 10:49:38 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 
@@ -39,7 +39,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `traceact/viewer/cost.py` | Cost estimates for model events via the optional `rates` package: lazy import, one bundled-snapshot registry load per process, provider+model price lookup (ambiguous or unknown pairs refused). Never touches traceact's global configuration or the network. |
 | `traceact/viewer/static/index.html` | The single-page app shell. |
 | `traceact/viewer/static/styles.css` | The viewer's design system: dark theme, CSS custom properties, hover popups. |
-| `traceact/viewer/static/app.js` | All front-end logic, no framework: source management, SSE stream handling, trace log, inspector, map replay, search and pre-filters, settings, diagnostics, focus controls, cost estimates. |
+| `traceact/viewer/static/app.js` | All front-end logic, no framework: source management, SSE stream handling, trace log, inspector, map replay, timeline, attempt-sequence grouping, search and pre-filters, settings, diagnostics, focus controls, cost estimates. |
 
 ## Tests
 

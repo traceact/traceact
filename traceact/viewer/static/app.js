@@ -54,7 +54,7 @@ const state = {
   currentSource: null,    // source name currently streamed
   traces: [],             // newest-first, capped at settings.limit
   selected: null,         // the trace object shown in the inspector
-  activeTab: "log",       // "log" | "map"
+  activeTab: "log",       // "log" | "map" | "timeline"
   search: "",
   // Pre-filters seeded from URL params when the viewer is opened via
   // TraceLog.view(). Empty in normal usage — no effect on viewer behaviour.
@@ -99,7 +99,7 @@ function init() {
   loadVersion();
   initPreFilters();      // reads ?pf_* URL params seeded by TraceLog.view()
 
-  if (VIEW_PARAM === "map") setTab("map");
+  if (VIEW_PARAM === "map" || VIEW_PARAM === "timeline") setTab(VIEW_PARAM);
 
   refreshSources().then(() => {
     if (state.sources.length === 0) {
@@ -282,6 +282,9 @@ function openStream(name) {
           if (state.selected && state.selected.trace_id === t.trace_id) {
             state.selected = t;
             renderInspector();
+            // A watched in-flight trace redraws its timeline as it fills in;
+            // the map already redraws itself through its replay loop.
+            if (state.activeTab === "timeline") renderTimeline();
           }
         } else {
           state.traces.unshift(t);
@@ -308,7 +311,7 @@ function maybeAutoOpenLatest() {
   if (!autoOpenPending || state.traces.length === 0) return;
   autoOpenPending = false;
   selectTrace(state.traces[0]);
-  if (VIEW_PARAM === "map") setTab("map");
+  if (VIEW_PARAM === "map" || VIEW_PARAM === "timeline") setTab(VIEW_PARAM);
 }
 
 /* Batch renders so a burst of appends doesn't thrash the DOM. */
@@ -412,6 +415,7 @@ function selectTrace(t) {
   renderLog();       // refresh selected-row highlight
   renderInspector();
   if (state.activeTab === "map") renderMap();
+  if (state.activeTab === "timeline") renderTimeline();
 }
 
 function renderInspector() {
@@ -421,9 +425,11 @@ function renderInspector() {
     el.innerHTML = `<div class="muted">Select a trace to inspect it.</div>`;
     return;
   }
-  el.innerHTML = state.activeTab === "map"
-    ? inspectorFull(t)
-    : inspectorSummary(t);
+  // The log tab gets the compact summary card; the map and timeline tabs
+  // both get the full steps/events/touches/errors breakdown.
+  el.innerHTML = state.activeTab === "log"
+    ? inspectorSummary(t)
+    : inspectorFull(t);
   wireInspectorButtons();
   fillCostEstimates(el);
 }
@@ -515,24 +521,92 @@ function sectionSteps(t) {
 
 function sectionEvents(t) {
   const events = t.events || [];
-  const rows = events.map((e) => {
-    const ok = e.status !== "failed";
-    const arrow = `${esc(e.operation || "")} → ${esc(e.target || "")}`;
-    const sub = eventSubline(e);
-    const inp = eventInputLine(e);
-    const cost = eventCostLine(e);
-    return `<div class="insp-event">
-      <div class="insp-event-head">${kindBadge(e.kind)}
-        <span>${ok ? "✓" : "✕"} ${arrow}</span></div>
-      ${inp ? `<div class="insp-event-sub">${esc(inp)}</div>` : ""}
-      ${sub ? `<div class="insp-event-sub">${esc(sub)}</div>` : ""}
-      ${cost}
-    </div>`;
-  }).join("");
+  // Consecutive events recorded with attempt= against the same operation
+  // render as one retry sequence instead of N look-alike rows.
+  const blocks = groupAttempts(events).map((g) =>
+    g.events.length > 1 ? attemptGroupHtml(g) : eventHtml(g.events[0])
+  ).join("");
   const total = state.costEstimates
     ? `<div class="insp-cost-total" id="insp-cost-total"></div>` : "";
   return `<div class="insp-section-label">EVENTS (${events.length})</div>
-    <div class="insp-list">${rows || `<span class="muted">none</span>`}</div>${total}`;
+    <div class="insp-list">${blocks || `<span class="muted">none</span>`}</div>${total}`;
+}
+
+function eventHtml(e) {
+  const ok = e.status !== "failed";
+  const arrow = `${esc(e.operation || "")} → ${esc(e.target || "")}`;
+  const sub = eventSubline(e);
+  const inp = eventInputLine(e);
+  const cost = eventCostLine(e);
+  return `<div class="insp-event">
+    <div class="insp-event-head">${kindBadge(e.kind)}
+      <span>${ok ? "✓" : "✕"} ${arrow}</span></div>
+    ${inp ? `<div class="insp-event-sub">${esc(inp)}</div>` : ""}
+    ${sub ? `<div class="insp-event-sub">${esc(sub)}</div>` : ""}
+    ${cost}
+  </div>`;
+}
+
+/* ---- Attempt sequences ------------------------------------------------- */
+//
+// The attempt convention: an event recorded with attempt= (a 1-based int)
+// and optionally attempt_reason= marks one try of a retried operation.
+// Nothing is stamped into the records — consecutive events that carry
+// attempt numbers, share kind+operation+target, and count strictly upward
+// are grouped at display time, here and on the map. Existing traces gain
+// the grouping retroactively; events without attempt= render as before.
+
+function toAttempt(value) {
+  const n = typeof value === "string" && value !== "" ? Number(value) : value;
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+function attemptKey(e) {
+  return `${e.kind}|${e.operation}|${e.target}`;
+}
+
+/* Partition events (order preserved) into {events: [...]} groups; a group
+ * with more than one entry is a retry sequence. A repeated or lower attempt
+ * number starts a new sequence — two retry loops against the same target,
+ * back to back, are two sequences, not one. */
+function groupAttempts(events) {
+  const out = [];
+  for (const e of events) {
+    const att = toAttempt(e.attempt);
+    const prev = out[out.length - 1];
+    const prevLast = prev ? prev.events[prev.events.length - 1] : null;
+    if (att !== null && prev && prev.sequence &&
+        attemptKey(e) === attemptKey(prevLast) &&
+        att > toAttempt(prevLast.attempt)) {
+      prev.events.push(e);
+    } else {
+      out.push({ sequence: att !== null, events: [e] });
+    }
+  }
+  return out;
+}
+
+function attemptGroupHtml(g) {
+  const events = g.events;
+  const last = events[events.length - 1];
+  const ok = last.status !== "failed";
+  const arrow = `${esc(last.operation || "")} → ${esc(last.target || "")}`;
+  const rows = events.map((e) => {
+    const failed = e.status === "failed";
+    const reason = e.attempt_reason ? ` · ${esc(String(e.attempt_reason))}` : "";
+    // Each attempt keeps its own cost line — a retried model call bills
+    // every try, and the trace total counts them all.
+    return `<div class="insp-attempt${failed ? " failed" : ""}">${failed ? "✕" : "✓"} attempt ${toAttempt(e.attempt)}${reason}</div>${eventCostLine(e)}`;
+  }).join("");
+  const closing = ok
+    ? `attempt ${toAttempt(last.attempt)} of ${events.length} succeeded`
+    : `all ${events.length} attempts failed`;
+  return `<div class="insp-event">
+    <div class="insp-event-head">${kindBadge(last.kind)}
+      <span>${ok ? "✓" : "✕"} ${arrow} <span class="attempt-count">×${events.length}</span></span></div>
+    ${rows}
+    <div class="insp-event-sub attempt-closing">${esc(closing)}</div>
+  </div>`;
 }
 
 /* ---- Cost estimates ---------------------------------------------------- */
@@ -790,7 +864,14 @@ function buildMap(t) {
   const TITLE_CHAR_PX = 8.0;
   const SUB_CHAR_PX = 6.8;
 
-  const events = t.events || [];
+  // A retry sequence (see groupAttempts) collapses to one node marked ×N —
+  // three tries of one call are one place on the map, not three boxes. The
+  // node carries the final attempt's status and ids; edges are unaffected
+  // (every THROUGH node connects to every ONWARD node regardless of ids).
+  const events = groupAttempts(t.events || []).map((g) =>
+    g.events.length > 1
+      ? { ...g.events[g.events.length - 1], retries: g.events.length }
+      : g.events[0]);
   const origin = {
     id: "origin",
     title: t.project || t.action || "trace",
@@ -893,12 +974,14 @@ function buildMap(t) {
 }
 
 function nodeFromEvent(e) {
+  const sub = e.operation ? `${e.kind}.${e.operation}` : e.kind;
   return {
     id: e.event_id || Math.random().toString(36).slice(2),
     title: e.target || e.operation || e.kind || "event",
     kind: e.kind || "app",
     status: e.status || "completed",
-    sub: e.operation ? `${e.kind}.${e.operation}` : e.kind,
+    // A collapsed retry sequence carries its try count on the sub-line.
+    sub: e.retries ? `${sub} ×${e.retries}` : sub,
     parent: e.parent_event_id || null,
   };
 }
@@ -1081,6 +1164,241 @@ function toggleReplay() {
   }
 }
 
+/* ---- Timeline --------------------------------------------------------- */
+//
+// Every event as a horizontal bar on the trace's own clock, steps as tick
+// marks on a rail above the rows, and a measurement strip above the chart.
+//
+// An event's interval is [ended_at − duration_ms, ended_at]: events are
+// recorded when they finish, so the recorded timestamp is the bar's right
+// edge. An event without a usable duration_ms renders as an instant marker
+// at its recorded time and stays out of the summed/overlap/concurrency
+// numbers — the strip says how many events were counted rather than letting
+// partial data read as complete. Existing trace files need nothing new:
+// the view derives everything from fields the records already carry.
+//
+// Measurements, not verdicts: the strip reports wall-clock, summed event
+// time, overlap saved, max concurrency, and the longest event. Whether any
+// of that is a problem is the reader's call.
+
+function usableDuration(value) {
+  const n = typeof value === "string" && value !== "" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function parseTs(iso) {
+  const n = Date.parse(iso || "");
+  return Number.isFinite(n) ? n : null;
+}
+
+/* One row per event, in recorded order. Timed rows carry {s, e, dur}; the
+ * rest carry only {e} (the instant). Events whose timestamps don't parse
+ * can't be placed at all; they're counted so the chart can say so. */
+function timelineRows(t) {
+  const rows = [];
+  let unplottable = 0;
+  for (const ev of t.events || []) {
+    const end = parseTs(ev.ended_at) ?? parseTs(ev.started_at);
+    if (end === null) { unplottable += 1; continue; }
+    const dur = usableDuration(ev.duration_ms);
+    const att = toAttempt(ev.attempt);
+    const label = (ev.target || ev.operation || ev.kind || "event")
+      + (att !== null ? ` (attempt ${att})` : "");
+    rows.push({
+      label,
+      kind: ev.kind,
+      failed: ev.status === "failed",
+      s: dur !== null ? end - dur : null,
+      e: end,
+      dur,
+    });
+  }
+  return { rows, unplottable };
+}
+
+/* Total length of the union of [s, e] intervals — time when at least one
+ * of them was in flight. Merging over a sorted copy. */
+function intervalUnionMs(intervals) {
+  const sorted = intervals.slice().sort((a, b) => a.s - b.s);
+  let total = 0, curS = null, curE = 0;
+  for (const iv of sorted) {
+    if (curS === null) { curS = iv.s; curE = iv.e; }
+    else if (iv.s <= curE) { curE = Math.max(curE, iv.e); }
+    else { total += curE - curS; curS = iv.s; curE = iv.e; }
+  }
+  if (curS !== null) total += curE - curS;
+  return total;
+}
+
+/* Highest number of intervals in flight at once. Ends sort before starts at
+ * the same instant, so back-to-back sequential calls don't read as
+ * concurrent. */
+function maxConcurrency(intervals) {
+  const points = [];
+  for (const iv of intervals) { points.push([iv.s, 1]); points.push([iv.e, -1]); }
+  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let current = 0, peak = 0;
+  for (const [, delta] of points) {
+    current += delta;
+    if (current > peak) peak = current;
+  }
+  return peak;
+}
+
+function renderTimeline() {
+  const wrap = document.getElementById("timeline-wrap");
+  const caption = document.getElementById("timeline-caption");
+  const measures = document.getElementById("timeline-measures");
+  const t = state.selected;
+  if (!t) {
+    caption.textContent = "SELECT A TRACE";
+    measures.hidden = true;
+    wrap.innerHTML = `<div class="empty-state">Pick a trace from the log.</div>`;
+    return;
+  }
+  caption.textContent = `${(t.action || "").toUpperCase()} · ${shortId(t.trace_id).toUpperCase()}`;
+
+  const { rows, unplottable } = timelineRows(t);
+  if (rows.length === 0) {
+    measures.hidden = true;
+    wrap.innerHTML = `<div class="empty-state">${
+      (t.events || []).length
+        ? "None of this trace's events carry a parseable timestamp."
+        : "This trace recorded no events."}</div>`;
+    return;
+  }
+
+  renderTimelineMeasures(measures, t, rows, unplottable);
+  wrap.innerHTML = timelineSvg(t, rows, wrap.clientWidth);
+}
+
+function renderTimelineMeasures(el, t, rows, unplottable) {
+  const timed = rows.filter((r) => r.s !== null);
+  const items = [];
+
+  const wall = t.duration_ms != null
+    ? fmtDurLong(t.duration_ms)
+    : (t.status === "running" ? "still running" : "not recorded");
+  items.push(["Wall-clock", wall]);
+
+  if (timed.length > 0) {
+    const summed = timed.reduce((acc, r) => acc + r.dur, 0);
+    const union = intervalUnionMs(timed);
+    // Sequential intervals: summed equals union and this is 0. Anything
+    // above 0 is time two or more events shared instead of queueing for.
+    const saved = Math.max(0, summed - union);
+    const longest = timed.reduce((a, b) => (b.dur > a.dur ? b : a));
+    items.push(["Summed event time", fmtDurLong(summed)]);
+    items.push(["Overlap saved", fmtDurLong(saved)]);
+    items.push(["Max concurrency", String(maxConcurrency(timed))]);
+    items.push(["Longest event", `${longest.label} · ${fmtDurLong(longest.dur)}`]);
+  }
+
+  let note = "";
+  if (timed.length < rows.length) {
+    note = `${timed.length} of ${rows.length} events carry duration_ms; the`
+      + ` rest render as instants and stay out of the sums.`;
+  }
+  if (unplottable > 0) {
+    note += `${note ? " " : ""}${unplottable} event${unplottable > 1 ? "s" : ""}`
+      + ` without a parseable timestamp not shown.`;
+  }
+
+  el.innerHTML = items.map(([label, value]) =>
+    `<span class="tl-measure"><span class="tl-measure-label">${esc(label)}</span>${esc(value)}</span>`
+  ).join("") + (note ? `<div class="tl-note">${esc(note)}</div>` : "");
+  el.hidden = false;
+}
+
+function timelineSvg(t, rows, availableWidth) {
+  const ROW_H = 24, BAR_H = 12, RIGHT = 90;
+  const AXIS_TOP = 24;      // gridline labels
+  const LABEL_CHAR_PX = 6.8;
+
+  // Left gutter sized to the longest row label, like the map's box widths.
+  const GUT = Math.max(140, Math.min(300,
+    rows.reduce((m, r) => Math.max(m, r.label.length), 0) * LABEL_CHAR_PX + 24));
+
+  // The plot fills whatever width the pane offers (minus the wrap's own
+  // padding), floored so a narrow pane scrolls instead of crushing the bars.
+  const PLOT_W = Math.max(360, (availableWidth || 0) - GUT - RIGHT - 20);
+
+  const steps = (t.steps || [])
+    .map((s) => ({ at: parseTs(s.recorded_at), label: s.label || "" }))
+    .filter((s) => s.at !== null);
+  const STEP_RAIL = steps.length ? 18 : 0;
+
+  // The clock: from the trace's start to its end, stretched if needed so
+  // every plotted point fits (clock skew between an event's caller-supplied
+  // duration and the trace's own stamps must widen the window, not push
+  // bars off the chart).
+  let t0 = parseTs(t.started_at);
+  let t1 = t.duration_ms != null && t0 !== null ? t0 + t.duration_ms : null;
+  for (const r of rows) {
+    const lo = r.s !== null ? r.s : r.e;
+    if (t0 === null || lo < t0) t0 = lo;
+    if (t1 === null || r.e > t1) t1 = r.e;
+  }
+  for (const s of steps) {
+    if (s.at < t0) t0 = s.at;
+    if (s.at > t1) t1 = s.at;
+  }
+  const span = Math.max(1, t1 - t0);
+  const x = (ms) => GUT + ((ms - t0) / span) * PLOT_W;
+
+  const chartTop = AXIS_TOP + STEP_RAIL;
+  const height = chartTop + rows.length * ROW_H + 16;
+  const width = GUT + PLOT_W + RIGHT;
+
+  // Axis gridlines on a 1–2–5 step sized for about five of them.
+  const stepMs = niceStep(span / 5);
+  let grid = "";
+  for (let g = 0; g <= span + stepMs / 2; g += stepMs) {
+    const gx = x(t0 + g);
+    if (gx > GUT + PLOT_W + 1) break;
+    grid += `<line class="tl-grid" x1="${gx}" y1="${AXIS_TOP - 6}" x2="${gx}" y2="${height - 8}"/>
+      <text class="tl-axis-label" x="${gx}" y="${AXIS_TOP - 10}" text-anchor="middle">${esc(fmtDurShort(g))}</text>`;
+  }
+
+  // Steps as ticks on their own rail, each with a hover title.
+  const stepSvg = steps.map((s) =>
+    `<g><line class="tl-step" x1="${x(s.at)}" y1="${AXIS_TOP}" x2="${x(s.at)}" y2="${AXIS_TOP + 12}"/>
+      <title>${esc(s.label)} · ${esc(fmtDurShort(s.at - t0))}</title></g>`
+  ).join("");
+
+  const rowSvg = rows.map((r, i) => {
+    const y = chartTop + i * ROW_H;
+    const cy = y + ROW_H / 2;
+    const label = `<text class="tl-label${r.failed ? " failed" : ""}" x="${GUT - 12}" y="${cy + 4}" text-anchor="end">${esc(truncate(r.label, Math.floor((GUT - 24) / LABEL_CHAR_PX)))}</text>`;
+    const title = `<title>${esc(r.label)} · ${r.dur !== null ? esc(fmtDurLong(r.dur)) : "no duration recorded"}${r.failed ? " · failed" : ""}</title>`;
+    if (r.s === null) {
+      // No duration: an instant diamond at the recorded time.
+      const cx = x(r.e);
+      return `<g>${label}<path class="tl-instant${r.failed ? " failed" : ""}"
+          d="M${cx},${cy - 5} L${cx + 5},${cy} L${cx},${cy + 5} L${cx - 5},${cy} Z"
+          fill="${kindColor(r.kind)}"/>${title}</g>`;
+    }
+    const x1 = x(r.s);
+    const w = Math.max(2, x(r.e) - x1);
+    const durText = `<text class="tl-dur" x="${x1 + w + 8}" y="${cy + 4}">${esc(fmtDurShort(r.dur))}${r.failed ? " ✕" : ""}</text>`;
+    return `<g>${label}<rect class="tl-bar${r.failed ? " failed" : ""}" x="${x1}" y="${cy - BAR_H / 2}"
+        width="${w}" height="${BAR_H}" rx="3" fill="${kindColor(r.kind)}"/>${durText}${title}</g>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"
+    xmlns="http://www.w3.org/2000/svg">${grid}${stepSvg}${rowSvg}</svg>`;
+}
+
+/* The largest of 1×, 2×, 5× a power of ten that is ≤ the target — the
+ * usual axis-step progression (…, 100ms, 200ms, 500ms, 1s, 2s, …). */
+function niceStep(target) {
+  const mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, target))));
+  for (const m of [5, 2, 1]) {
+    if (mag * m <= target) return mag * m;
+  }
+  return mag;
+}
+
 /* ---- Focus hook ------------------------------------------------------- */
 //
 // Only rendered when the server was started with --focus-hook (advertised in
@@ -1170,8 +1488,10 @@ function setTab(tab) {
     b.classList.toggle("active", b.dataset.tab === tab));
   document.getElementById("view-log").hidden = tab !== "log";
   document.getElementById("view-map").hidden = tab !== "map";
+  document.getElementById("view-timeline").hidden = tab !== "timeline";
   renderInspector();
   if (tab === "map") renderMap();
+  if (tab === "timeline") renderTimeline();
 }
 
 /* ---- Pre-filters (TraceLog.view() integration) ----------------------- */
