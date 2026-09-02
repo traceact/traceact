@@ -105,3 +105,10 @@ include = ["traceact*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# rates is a soft dependency (viewer cost estimates): imported lazily inside
+# viewer/cost.py and absent from most environments, CI included. mypy would
+# otherwise fail the import-resolution check wherever it isn't installed.
+[[tool.mypy.overrides]]
+module = "rates.*"
+ignore_missing_imports = true

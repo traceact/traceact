@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-01 19:41:35 UTC
+Last updated: 2026-09-02 09:51:47 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 
@@ -83,7 +83,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 
 | File | What it does |
 |---|---|
-| `pyproject.toml` | Package metadata, version, dev extras, the `traceact` console script, wheel package-data (USAGE.md, static assets, `py.typed`). |
+| `pyproject.toml` | Package metadata, version, dev extras, the `traceact` console script, wheel package-data (USAGE.md, static assets, `py.typed`), pytest and mypy configuration. |
 | `MANIFEST.in` | sdist contents beyond the package (USAGE.md and friends). |
 | `launch.command` | Double-clickable macOS launcher: finds Python 3.10+, creates/reuses `.venv/`, installs traceact, starts the viewer. |
 | `README.md` | Front page: install, quick start, viewer tour, links to the full docs. |
