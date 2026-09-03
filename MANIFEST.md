@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-03 19:32:12 UTC
+Last updated: 2026-09-03 20:47:37 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 

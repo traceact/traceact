@@ -195,7 +195,7 @@ handler = TraceActCallbackHandler()
 chain.invoke(inputs, config={"callbacks": [handler]})
 ```
 
-Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Prompt text isn't recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
+Chains, model calls, tool runs, and retrievers each become traces with the right parent links and one shared correlation ID per run. Model events carry the provider langchain-core reports (`ls_provider`), so adapter-recorded calls get viewer cost estimates like hand-recorded ones. Prompt text isn't recorded unless you opt in, and opted-in content still passes through redaction. The adapter imports `langchain-core` only when you import it — `import traceact` stays zero-dependency.
 
 Captured values are guarded twice: field-name redaction (`password`, `api_key`, …) plus default-on content scanning that catches credential formats (AWS keys, `sk-` tokens, JWTs, PEM blocks) wherever they appear — even in a field named `location` or mid-sentence in free text. `traceact doctor --scan` runs the same registry over trace files already on disk.
 

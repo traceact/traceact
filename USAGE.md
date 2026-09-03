@@ -1634,7 +1634,7 @@ $ traceact doctor data/traces/traces.jsonl
 traceact doctor
 
   ✓  Python 3.10 (meets the 3.10+ requirement)
-  ·  traceact 1.1.0
+  ·  traceact 1.4.0
   ·  rates not installed — cost estimates are off (pip install rates to turn them on)
   ✓  State directory (/Users/you/.traceact) is writable
   ·  No viewer currently running (not required).
