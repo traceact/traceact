@@ -205,6 +205,68 @@ class TestRunTreeParentage:
         assert len(chain_rec["child_summaries"]) == 1
 
 
+class TestProviderRecording:
+    # langchain-core stamps ls_provider into a model run's callback metadata;
+    # the adapter records it verbatim on the model event. A run whose
+    # metadata carries no provider gets none recorded — nothing is inferred.
+    # All runs here go through langchain-core's own dispatch, so the tests
+    # prove where the value travels, not just that a dict key is copied.
+
+    def _model_event(self, sink_file):
+        rec = _by_action(_records(sink_file), "model.")[0]
+        return next(e for e in rec["events"] if e["kind"] == "model")
+
+    def test_chat_model_run_records_reported_provider(self, sink_file):
+        import itertools
+        from langchain_core.language_models.fake_chat_models import (
+            GenericFakeChatModel,
+        )
+        from langchain_core.messages import AIMessage
+
+        chat = GenericFakeChatModel(
+            messages=itertools.cycle([AIMessage(content="hi")]))
+        chat.invoke("hello", config={"callbacks": [TraceActCallbackHandler()]})
+
+        evt = self._model_event(sink_file)
+        # The fake model's ls_provider value, verbatim — whatever
+        # langchain-core reports is what the record says.
+        assert evt["provider"] == "genericfakechatmodel"
+
+    def test_llm_run_records_reported_provider(self, sink_file):
+        llm = FakeListLLM(responses=["ok"])
+        llm.invoke("hi", config={"callbacks": [TraceActCallbackHandler()]})
+        assert self._model_event(sink_file)["provider"] == "fakelist"
+
+    def test_unreported_provider_stays_absent(self, sink_file):
+        # A model whose ls params carry no ls_provider — overriding
+        # _get_ls_params is langchain-core's own extension point for this.
+        import itertools
+        from langchain_core.language_models.chat_models import LangSmithParams
+        from langchain_core.language_models.fake_chat_models import (
+            GenericFakeChatModel,
+        )
+        from langchain_core.messages import AIMessage
+
+        class NoProviderChat(GenericFakeChatModel):
+            def _get_ls_params(self, stop=None, **kwargs):
+                return LangSmithParams(ls_model_type="chat")
+
+        chat = NoProviderChat(
+            messages=itertools.cycle([AIMessage(content="hi")]))
+        chat.invoke("hello", config={"callbacks": [TraceActCallbackHandler()]})
+
+        evt = self._model_event(sink_file)
+        assert "provider" not in evt
+
+    def test_provider_table_is_cleaned_up(self, sink_file):
+        # The run table must not accumulate provider entries across runs —
+        # error endings included.
+        handler = TraceActCallbackHandler()
+        FakeListLLM(responses=["a"]).invoke(
+            "q", config={"callbacks": [handler]})
+        assert handler._providers == {}
+
+
 class TestRetrieverRuns:
     def test_retriever_produces_a_retrieval_trace(self, sink_file):
         # kind is "retrieval", not "db": the retriever abstraction covers

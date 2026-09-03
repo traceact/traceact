@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-02 16:39:12 UTC
+Last updated: 2026-09-03 19:32:12 UTC
 
 Every source file in the repository, with what it does and what it touches. A map for orienting, not a second copy of the docstrings.
 
@@ -23,7 +23,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `traceact/propagation.py` | Cross-service linking: `inject_headers`, `inject_context`, `propagate`, `extract_trace_id` — the `traceact-trace-id` / `traceact-correlation-id` header pair. |
 | `traceact/middleware.py` | `TraceActMiddleware` (WSGI) and `TraceActASGIMiddleware` (ASGI): automatic inbound propagation for Flask, Django, FastAPI, Starlette. |
 | `traceact/integrations/__init__.py` | Empty namespace marker; nothing in `integrations/` is imported by the top-level package. |
-| `traceact/integrations/langchain.py` | `TraceActCallbackHandler`: maps LangChain runs (chains, models, tools, retrievers) to traces with correct parentage and token counts. Imports `langchain-core` only when the module itself is imported. |
+| `traceact/integrations/langchain.py` | `TraceActCallbackHandler`: maps LangChain runs (chains, models, tools, retrievers) to traces with correct parentage, token counts, and the provider langchain-core reports (`ls_provider`). Imports `langchain-core` only when the module itself is imported. |
 | `traceact/py.typed` | PEP 561 marker so type checkers read the package's annotations. |
 
 ## Package — viewer
@@ -54,7 +54,7 @@ Every source file in the repository, with what it does and what it touches. A ma
 | `tests/test_event_inputs.py` | `capture_event_inputs`: opt-in recording, kill switch, redaction of event inputs. |
 | `tests/test_http_sink.py` | `HttpSink`: delivery, headers, failure counting, `network_policy` modes. |
 | `tests/test_integration_celery.py` | Queue propagation through a Celery-shaped task boundary. |
-| `tests/test_integration_langchain.py` | The LangChain adapter: run mapping, parentage, token counts, content opt-in. |
+| `tests/test_integration_langchain.py` | The LangChain adapter: run mapping, parentage, token counts, provider recording (`ls_provider`, never inferred), content opt-in. |
 | `tests/test_nested_filters.py` | Dotted-path filtering in `TraceLog` and over `/api/query`: list fan-out, operator composition, missing-path semantics, unchanged top-level behaviour. |
 | `tests/test_netguard.py` | `_netguard`: address classification, multi-answer DNS, redirect refusal (live loopback servers), public export pins. |
 | `tests/test_otlp_sink.py` | `OtlpSink`: span mapping, delivery, failure counting, `network_policy` modes. |

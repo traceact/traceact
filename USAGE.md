@@ -1748,7 +1748,7 @@ That event's inspector row shows `est. $0.0036`, and a trace with at least one p
 What an event needs to be priced:
 
 - `kind="model"` with **token counts** — `tokens_in` and/or `tokens_out`, the same fields `trace.model()` and the LangChain adapter already record.
-- A **`provider`** field naming who served the call (`"anthropic"`, `"openai"`, `"azure"`, ...). One model id is sold by many providers at different prices, so an event without a provider shows a hint instead of a number — the caller knows which provider it called; the viewer won't guess.
+- A **`provider`** field naming who served the call (`"anthropic"`, `"openai"`, `"azure"`, ...). One model id is sold by many providers at different prices, so an event without a provider shows a hint instead of a number — the caller knows which provider it called; the viewer won't guess. The [LangChain adapter](#langchain) records this automatically when langchain-core reports it.
 
 How the pricing works:
 
@@ -2150,7 +2150,7 @@ What maps to what:
 | LangChain run | TraceAct trace |
 |---|---|
 | chain / runnable | `kind="app"`, action `chain.<name>` |
-| LLM / chat model | `kind="model"`, action `model.<name>`, plus a model event with token counts |
+| LLM / chat model | `kind="model"`, action `model.<name>`, plus a model event with token counts and, when langchain-core reports one (`ls_provider` in the run metadata, filled in by each provider package), a `provider` — so adapter-recorded calls get [cost estimates](#cost-estimates) in the viewer. A run whose metadata reports no provider gets none recorded; the adapter never infers one |
 | tool | `kind="tool"`, action `tool.<name>`, plus a tool event |
 | retriever | `kind="retrieval"`, action `retriever.<name>` — the kind names the operation; the target carries the retriever class, which identifies the backend (vector store, web search, file search) |
 | agent action | a step on the enclosing run's trace |

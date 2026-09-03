@@ -114,6 +114,24 @@ def _model_name(serialized: Optional[Dict[str, Any]],
     return _name_of(serialized, "unknown-model", kwargs)
 
 
+def _provider_of(kwargs: Dict[str, Any]) -> Optional[str]:
+    """
+    The provider langchain-core reported for a model run, or None.
+
+    langchain-core stamps ``ls_provider`` into a model run's callback
+    metadata, and each provider package fills in its own value ("openai",
+    "anthropic", ...). The value is recorded verbatim when present; a run
+    whose metadata carries none gets no provider recorded — the record
+    states what the framework reported, and nothing is inferred.
+    """
+    metadata = kwargs.get("metadata")
+    if isinstance(metadata, dict):
+        value = metadata.get("ls_provider")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 class TraceActCallbackHandler(BaseCallbackHandler):
     """
     Records LangChain runs as TraceAct traces.
@@ -126,7 +144,9 @@ class TraceActCallbackHandler(BaseCallbackHandler):
 
         chain / runnable run  →  trace kind="app",       action="chain.<name>"
         LLM / chat model run  →  trace kind="model",     action="model.<name>",
-                                 plus a model event carrying token counts
+                                 plus a model event carrying token counts and
+                                 the provider langchain-core reported
+                                 (``ls_provider``), when it reported one
         tool run              →  trace kind="tool",      action="tool.<name>",
                                  plus a tool event
         retriever run         →  trace kind="retrieval", action="retriever.<name>"
@@ -171,6 +191,9 @@ class TraceActCallbackHandler(BaseCallbackHandler):
         self._fixed_correlation_id = correlation_id
         self._capture_content = capture_content
         self._runs: Dict[Any, Any] = {}
+        # provider reported for a model run at start, consumed at end —
+        # keyed by run_id like _runs, cleaned up alongside it in _end().
+        self._providers: Dict[Any, str] = {}
         self._lock = threading.Lock()
 
     # -- run-table plumbing -------------------------------------------------
@@ -200,6 +223,7 @@ class TraceActCallbackHandler(BaseCallbackHandler):
         """Finish and forget a run's trace. Unknown run_ids are ignored."""
         with self._lock:
             trace = self._runs.pop(run_id, None)
+            self._providers.pop(run_id, None)
         if trace is None:
             return
         if error is not None:
@@ -210,6 +234,13 @@ class TraceActCallbackHandler(BaseCallbackHandler):
     def _get(self, run_id: Any) -> Any:
         with self._lock:
             return self._runs.get(run_id)
+
+    def _note_provider(self, run_id: Any, kwargs: Dict[str, Any]) -> None:
+        """File the run's reported provider for on_llm_end, if there is one."""
+        provider = _provider_of(kwargs)
+        if provider is not None:
+            with self._lock:
+                self._providers[run_id] = provider
 
     # -- chains -------------------------------------------------------------
 
@@ -247,6 +278,7 @@ class TraceActCallbackHandler(BaseCallbackHandler):
         try:
             model = _model_name(serialized, kwargs)
             trace = self._begin(run_id, parent_run_id, f"model.{model}", "model")
+            self._note_provider(run_id, kwargs)
             if self._capture_content and prompts:
                 trace.input({"prompts": list(prompts)})
         except Exception:
@@ -258,6 +290,7 @@ class TraceActCallbackHandler(BaseCallbackHandler):
         try:
             model = _model_name(serialized, kwargs)
             trace = self._begin(run_id, parent_run_id, f"model.{model}", "model")
+            self._note_provider(run_id, kwargs)
             if self._capture_content and messages:
                 trace.input({
                     "messages": [
@@ -277,7 +310,13 @@ class TraceActCallbackHandler(BaseCallbackHandler):
                 # event target so touches and OTLP output identify it too.
                 model = getattr(trace, "action", "model.unknown")
                 model = model.split(".", 1)[1] if "." in model else model
-                trace.model(operation="completion", target=model, **usage)
+                # provider= only when the framework reported one at start —
+                # an unreported provider stays absent from the record.
+                with self._lock:
+                    provider = self._providers.get(run_id)
+                extra = {"provider": provider} if provider else {}
+                trace.model(operation="completion", target=model,
+                            **extra, **usage)
                 if self._capture_content:
                     texts = []
                     for gens in getattr(response, "generations", []) or []:

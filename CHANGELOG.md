@@ -2,6 +2,12 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.4.0] — 2026-09-03
+
+### Added
+
+- **The LangChain adapter records `provider` on model events.** langchain-core stamps `ls_provider` into each model run's callback metadata (every provider package fills in its own value), and the adapter now copies it onto the model event verbatim — so adapter-recorded calls get viewer cost estimates like hand-recorded ones. A run whose metadata reports no provider gets none recorded: the adapter never infers one, and those events keep today's "add provider= for a cost estimate" hint in the viewer.
+
 ## [1.3.0] — 2026-09-02
 
 ### Added
