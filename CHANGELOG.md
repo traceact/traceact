@@ -2,6 +2,16 @@
 
 All notable changes to TraceAct are documented here.
 
+## [1.5.0] — 2026-09-09
+
+### Added
+
+- **`ObjectStoreSink` and `S3Backend`: write traces to blob storage.** Object stores take whole objects at a key, not appended lines, so `ObjectStoreSink` coalesces finished traces into newline-delimited JSON and writes each batch as one object keyed `prefix/YYYY/MM/DD/<epoch_ms>-<uuid>.jsonl`, so keys sort in write order. It's transport-agnostic: it calls a backend's `put(key, body, content_type)`. `S3Backend` is the first backend and covers every S3-API store (Amazon S3, Cloudflare R2, Backblaze B2, Replit Object Storage) with one class, signing each request with AWS Signature Version 4 using only the standard library, `import traceact` stays dependency-free. Objects are plain `.jsonl` by default so a reader uses them without a decompress step; `compress=True` gzips each object (`.jsonl.gz`) when storage bytes are the priority. A batch that fails to deliver counts its records in `ObjectStoreSink.failed`, never raised; the same outbound network guard as `HttpSink`/`OtlpSink` applies. Wrap in `AsyncSink` for production. See [ObjectStoreSink](https://github.com/traceact/traceact/blob/main/USAGE.md#objectstoresink) in USAGE.md.
+
+### Changed
+
+- **`AsyncSink.close()` and `.flush()` now flush inner sinks that buffer across writes.** Every sink shipped before this wrote one record per `write()`, so closing the wrapper had nothing to flush inside it. `ObjectStoreSink` is the first that holds a sub-threshold batch between writes, so `AsyncSink` now flushes its inner sinks after draining the queue — a short-lived script following the documented `AsyncSink([ObjectStoreSink(...)])` pattern delivers its last partial batch on exit instead of losing it. Inner sinks that expose no `flush()` are untouched.
+
 ## [1.4.0] — 2026-09-03
 
 ### Added

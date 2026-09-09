@@ -45,6 +45,17 @@
 #                   counted in OtlpSink.failed. Always wrap in AsyncSink
 #                   for production use.
 #
+#   ObjectStoreSink — batches traces into newline-delimited JSON objects and
+#                   writes each batch to a blob store through a backend
+#                   (any object with put(key, body, content_type)). Plain
+#                   .jsonl by default, gzip on request. Failed batches
+#                   counted in ObjectStoreSink.failed.
+#
+#   S3Backend     — the first ObjectStoreSink backend: any S3-API store
+#                   (Amazon S3, Cloudflare R2, Backblaze B2, Replit Object
+#                   Storage), signed with SigV4 using only the standard
+#                   library.
+#
 #   NetworkGuardError / NetworkGuardWarning — the outbound network guard's
 #                   error and warning types (see traceact/_netguard.py).
 #                   The warning is what the sinks' warn mode emits, so it
@@ -79,20 +90,34 @@
 #                   it as the reserved traceact_context kwarg to a
 #                   @traced_action function, or to propagate().
 #
+#   extract_trace_id / extract_correlation_id — read the inbound trace id and
+#                   correlation id from a request's headers, for code that
+#                   wants the raw values rather than propagate()'s context
+#                   manager. Return None when the header is absent.
+#
 #   TraceActMiddleware     — WSGI middleware (Flask, Django). Wraps the app and
 #                   propagates automatically on every request.
 #
 #   TraceActASGIMiddleware — ASGI middleware (FastAPI, Starlette). Same as
 #                   above for async frameworks.
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 from traceact.config import configure, reset_config, TraceConfig
 from traceact.budget import TraceBudget
 from traceact.trace import ActionTrace
 from traceact.decorators import traced_action
 from traceact.redaction import REDACTION_PRESETS
-from traceact.sinks import JsonlSink, ConsoleSink, AsyncSink, SqliteSink, HttpSink, OtlpSink
+from traceact.sinks import (
+    JsonlSink,
+    ConsoleSink,
+    AsyncSink,
+    SqliteSink,
+    HttpSink,
+    OtlpSink,
+    ObjectStoreSink,
+    S3Backend,
+)
 from traceact._netguard import NetworkGuardError, NetworkGuardWarning
 from traceact.log import TraceLog
 from traceact.propagation import (
@@ -118,6 +143,8 @@ __all__ = [
     "SqliteSink",
     "HttpSink",
     "OtlpSink",
+    "ObjectStoreSink",
+    "S3Backend",
     "NetworkGuardError",
     "NetworkGuardWarning",
     "REDACTION_PRESETS",

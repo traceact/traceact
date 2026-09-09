@@ -26,6 +26,7 @@ flowchart LR
         sqlite["SqliteSink → .db"]
         http["HttpSink → collector"]
         otlp["OtlpSink → OTLP/HTTP"]
+        objstore["ObjectStoreSink → blob store (S3/R2/…)"]
         console["ConsoleSink → stdout"]
     end
 
@@ -54,8 +55,8 @@ Ordering facts that constrain extensions:
   supersedes them and readers collapse last-wins per `trace_id`.
 - Sink failures never raise into the traced application: `strict=False`
   (the default) reports them to stderr; per-sink counters
-  (`AsyncSink.dropped`, `HttpSink.failed`, `OtlpSink.failed`) make loss
-  observable.
+  (`AsyncSink.dropped`, `HttpSink.failed`, `OtlpSink.failed`,
+  `ObjectStoreSink.failed`) make loss observable.
 
 ## Viewer
 
@@ -116,7 +117,7 @@ Coordination contracts:
   untouched — hook consumers depend on fields traceact doesn't define. A
   non-loopback hook auto-enables the token gate above. See Security
   considerations below for the outbound guard this route shares with
-  `HttpSink`/`OtlpSink`.
+  `HttpSink`/`OtlpSink`/`ObjectStoreSink`.
 - **Cost estimates**: `GET /api/cost` prices one model call via the optional
   rates package (`viewer/cost.py`). Display-time only — capture-time
   stamping was considered and rejected, because a stamped cost freezes
@@ -160,10 +161,11 @@ complete per-file map, small support modules included, is
 
 `traceact._netguard` is the one outbound-network guard shared by every place
 TraceAct makes an HTTP(S) call on the caller's behalf: `HttpSink`,
-`OtlpSink`, and the viewer's `POST /api/focus` forward. One implementation,
-so a change to the policy fixes all three instead of drifting apart.
+`OtlpSink`, `ObjectStoreSink`'s backend, and the viewer's `POST /api/focus`
+forward. One implementation,
+so a change to the policy fixes every caller instead of drifting apart.
 
-- **Redirects are never followed**, on any of the three paths — a validated
+- **Redirects are never followed**, on every one of these paths — a validated
   destination that answers with a redirect elsewhere bypasses whatever check
   just ran on the original URL, so nothing chases one.
 - **Destination classification**: a hostname resolving to any private,
@@ -182,7 +184,7 @@ so a change to the policy fixes all three instead of drifting apart.
   the checked address would close it and is a candidate for a later pass.
 - **Plain `http://` is loopback-only by default**; `allow_insecure_http`
   widens or narrows that.
-- **`HttpSink`/`OtlpSink` default to `network_policy="warn"`**: an unsafe
+- **`HttpSink`/`OtlpSink`/`S3Backend` default to `network_policy="warn"`**: an unsafe
   destination still delivers the same as before this guard existed —
   nothing that worked stops working — but emits a warning once, at
   construction. `network_policy="enforce"` re-checks before every write and

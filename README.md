@@ -174,7 +174,7 @@ with ActionTrace.start(action="note.create", kind="app") as trace:
 | `Step` | A human-readable timeline marker within a trace |
 | `Event` | A structured operation: db, http, file, model, job, etc. |
 | `Touch` | A resource involved in the trace (auto-derived from events) |
-| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`, `SqliteSink`, `HttpSink`, `OtlpSink`, wrapped by `AsyncSink`) |
+| `Sink` | Where completed traces are written (`JsonlSink`, `ConsoleSink`, `SqliteSink`, `HttpSink`, `OtlpSink`, `ObjectStoreSink` (blob storage: S3, R2, and other S3-API stores), wrapped by `AsyncSink`) |
 
 ### Design principle: observable by choice, never forced blind
 

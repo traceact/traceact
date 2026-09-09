@@ -3,9 +3,15 @@
 # Defines the sink system — where finished traces are written.
 #
 # A sink is any object that accepts a trace record (a plain Python dict) and
-# stores or displays it. TraceAct ships two sinks for v1:
-#   JsonlSink    — appends records to a .jsonl file, one JSON object per line.
-#   ConsoleSink  — prints records to stdout, formatted for readability.
+# stores or displays it. The sinks this module ships:
+#   JsonlSink       — appends records to a .jsonl file, one JSON object per line.
+#   ConsoleSink     — prints records to stdout, formatted for readability.
+#   SqliteSink      — writes records to a local SQLite database.
+#   HttpSink        — POSTs each record to an HTTP(S) collector.
+#   OtlpSink        — exports records to an OTLP-compatible collector.
+#   ObjectStoreSink — batches records into objects for a blob store; S3Backend
+#                     is the first backend (any S3-API store).
+#   AsyncSink       — wraps other sinks and writes on a background thread.
 #
 # How sink_mode is handled:
 # The sink objects themselves are simple: they just implement write(record).
@@ -17,15 +23,20 @@
 # The actual sink_mode logic lives in trace.py (_write_to_sinks). Sinks don't
 # need to know which mode is active — they just write when asked.
 #
-# Future sinks (SqliteSink, HttpSink, OpenTelemetrySink) will follow the same
-# interface: implement write(record: dict) and that is all TraceAct requires.
+# Every sink implements write(record: dict); that is all TraceAct requires.
+# AsyncSink additionally forwards each record to the inner sinks it wraps.
 
 import atexit
+import gzip
+import hashlib
+import hmac
 import json
 import os
 import queue
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -539,8 +550,8 @@ from traceact import _netguard
 def _warn_if_unsafe(url: str, allow_private_network: bool,
                     allow_insecure_http: Optional[bool]) -> None:
     """
-    Shared by HttpSink and OtlpSink's network_policy="warn" path: check the
-    destination once, emit NetworkGuardWarning if it fails, never raise.
+    Shared by HttpSink, OtlpSink, and S3Backend's network_policy="warn" path:
+    check the destination once, emit NetworkGuardWarning if it fails, never raise.
     """
     try:
         _netguard.check_destination(
@@ -573,8 +584,9 @@ class HttpSink:
         if sink.failed > 0:
             logger.warning("HttpSink: %d trace deliveries failed", sink.failed)
 
-    Every request goes through the same outbound guard as OtlpSink and the
-    viewer's focus hook (see traceact._netguard): redirects are never
+    Every request goes through the same outbound guard as OtlpSink,
+    ObjectStoreSink's backend, and the viewer's focus hook (see
+    traceact._netguard): redirects are never
     followed, and the destination is checked against
     network_policy/allow_private_network/allow_insecure_http below.
 
@@ -1066,8 +1078,9 @@ class OtlpSink:
         if sink.failed > 0:
             logger.warning("OtlpSink: %d trace deliveries failed", sink.failed)
 
-    Every request goes through the same outbound guard as HttpSink and the
-    viewer's focus hook (see traceact._netguard): redirects are never
+    Every request goes through the same outbound guard as HttpSink,
+    ObjectStoreSink's backend, and the viewer's focus hook (see
+    traceact._netguard): redirects are never
     followed, and the destination is checked against
     network_policy/allow_private_network/allow_insecure_http below.
 
@@ -1209,6 +1222,379 @@ class OtlpSink:
         """Increment the failure counter under its lock."""
         with self._failed_lock:
             self._failed += 1
+
+
+# ---------------------------------------------------------------------------
+# ObjectStoreSink and the S3-compatible backend
+# ---------------------------------------------------------------------------
+#
+# Object stores (Amazon S3, Cloudflare R2, Backblaze B2, Replit Object Storage,
+# and any S3-API service) take whole objects at a key, not appended lines. So
+# ObjectStoreSink coalesces records into batches and writes each batch as one
+# newline-delimited JSON object, keyed by time so a reader concatenates by key
+# order. The sink is transport-agnostic: it calls a backend's
+# put(key, body, content_type), and S3Backend is the first backend, signing
+# each request with SigV4 using only the standard library.
+
+from urllib.parse import quote as _urlquote, urlsplit as _urlsplit
+
+
+class ObjectStoreSink:
+    """
+    Batches finished traces into newline-delimited JSON objects and writes each
+    batch to a blob store through a backend.
+
+    A backend is any object with ``put(key, body, content_type)``. The first
+    one shipped is S3Backend, which covers every S3-API store (Amazon S3,
+    Cloudflare R2, Backblaze B2, Replit Object Storage):
+
+        from traceact import ObjectStoreSink, S3Backend, AsyncSink, configure
+
+        backend = S3Backend(
+            endpoint="https://s3.us-east-1.amazonaws.com",
+            bucket="my-traces",
+            access_key="<access-key>",
+            secret_key="<secret-key>",
+            region="us-east-1",
+        )
+        configure(sinks=[AsyncSink([ObjectStoreSink(backend, prefix="prod/")])])
+
+    **Batching.** ``write()`` buffers a record; the buffer is delivered as one
+    object when it reaches ``flush_records`` or when ``flush_seconds`` has
+    elapsed since the last delivery (checked on the next write), and always on
+    ``flush()`` and ``close()``. Each object is keyed
+    ``prefix/YYYY/MM/DD/<epoch_ms>-<uuid>.jsonl`` so keys sort in write order.
+
+    **Compression is off by default.** Objects are plain ``.jsonl`` a reader
+    can use without a decompress step. Pass ``compress=True`` to gzip each
+    object (``.jsonl.gz``, ``application/gzip``) when storage bytes are the
+    priority instead.
+
+    **Always wrap in AsyncSink for production.** Each delivered batch makes a
+    synchronous request; without AsyncSink that latency hits the traced call
+    that happened to fill the buffer.
+
+    **Observable failures.** A batch whose delivery fails counts its records in
+    ``ObjectStoreSink.failed`` — never raised, never silently dropped:
+
+        if sink.failed > 0:
+            logger.warning("ObjectStoreSink: %d records failed to store", sink.failed)
+
+    A failed batch is not retried; the count reflects records that did not
+    reach the store. The backend enforces the same outbound network guard as
+    HttpSink, OtlpSink, and the viewer's focus hook.
+
+    Args:
+        backend:
+            Any object with ``put(key, body, content_type)`` that raises on a
+            delivery failure. S3Backend is provided.
+
+        prefix:
+            Key namespace prepended to every object key, e.g. ``"prod/"``.
+            Leading and trailing slashes are optional.
+
+        flush_records:
+            Deliver the buffer once it holds this many records. Default: 500.
+
+        flush_seconds:
+            Deliver the buffer when this many seconds have elapsed since the
+            last delivery, checked on the next write. Default: 5.0.
+
+        compress:
+            gzip each object when True (``.jsonl.gz``). Default: False, plain
+            ``.jsonl``.
+    """
+
+    def __init__(
+        self,
+        backend: Any,
+        prefix: str = "",
+        flush_records: int = 500,
+        flush_seconds: float = 5.0,
+        compress: bool = False,
+    ) -> None:
+        if flush_records < 1:
+            raise ValueError(f"flush_records must be >= 1, got {flush_records!r}")
+        self.backend = backend
+        self.prefix = prefix.strip("/")
+        self.flush_records = flush_records
+        self.flush_seconds = flush_seconds
+        self.compress = compress
+
+        # Buffered lines waiting to become one object. Guarded because app
+        # threads call write() concurrently; the network put() runs outside
+        # the lock so delivery never blocks another thread's write().
+        self._buffer: List[bytes] = []
+        self._buffer_lock = threading.Lock()
+        self._last_flush = time.monotonic()
+
+        # Records whose batch failed to deliver. Observable by choice.
+        self._failed = 0
+        self._failed_lock = threading.Lock()
+
+        # Deliver a sub-threshold buffer at interpreter exit, so a sink used
+        # bare (without AsyncSink) never loses its last partial batch silently.
+        # Registered at construction, not first write, so it runs after
+        # AsyncSink's own atexit close when wrapped (atexit is LIFO and the
+        # wrapper registers later, on first write): the wrapper drains and
+        # flushes this sink first, leaving this handler a no-op on an empty
+        # buffer. A flush on an empty buffer costs nothing.
+        atexit.register(self.flush)
+
+    @property
+    def failed(self) -> int:
+        """Number of trace records whose batch failed to store."""
+        with self._failed_lock:
+            return self._failed
+
+    def write(self, record: Dict[str, Any]) -> None:
+        """
+        Buffer one record. Delivers the buffer as a single object when it
+        reaches flush_records or flush_seconds has elapsed since the last
+        delivery. Returns without delivering otherwise.
+        """
+        line = json.dumps(record, default=str).encode("utf-8") + b"\n"
+        batch: Optional[List[bytes]] = None
+        with self._buffer_lock:
+            self._buffer.append(line)
+            due = (
+                len(self._buffer) >= self.flush_records
+                or (time.monotonic() - self._last_flush) >= self.flush_seconds
+            )
+            if due:
+                batch = self._buffer
+                self._buffer = []
+                self._last_flush = time.monotonic()
+        if batch is not None:
+            self._deliver(batch)
+
+    def flush(self) -> None:
+        """Deliver any buffered records immediately as one object."""
+        with self._buffer_lock:
+            batch = self._buffer
+            self._buffer = []
+            self._last_flush = time.monotonic()
+        self._deliver(batch)
+
+    def close(self) -> None:
+        """Deliver any buffered records. Safe to call more than once."""
+        self.flush()
+
+    # -- internals ---------------------------------------------------------
+
+    def _deliver(self, lines: List[bytes]) -> None:
+        """Write one batch as a single object; count records on failure."""
+        if not lines:
+            return
+        body = b"".join(lines)
+        if self.compress:
+            body = gzip.compress(body)
+            suffix = ".jsonl.gz"
+            content_type = "application/gzip"
+        else:
+            suffix = ".jsonl"
+            content_type = "application/x-ndjson"
+        key = self._make_key(suffix)
+        try:
+            self.backend.put(key, body, content_type)
+        except Exception:
+            # Broad on purpose: a network error, a refused destination, or a
+            # non-2xx response all mean the batch did not store. Counted as
+            # records lost, never raised into the traced application.
+            with self._failed_lock:
+                self._failed += len(lines)
+
+    def _make_key(self, suffix: str) -> str:
+        """Build a time-ordered object key: prefix/YYYY/MM/DD/<ms>-<uuid>."""
+        now = datetime.now(timezone.utc)
+        epoch_ms = int(now.timestamp() * 1000)
+        name = f"{epoch_ms}-{uuid.uuid4().hex[:12]}{suffix}"
+        segments = [self.prefix, now.strftime("%Y/%m/%d"), name]
+        return "/".join(s for s in segments if s)
+
+
+class S3Backend:
+    """
+    Writes objects to any S3-API store, signing each request with AWS Signature
+    Version 4 using only the standard library.
+
+    One backend covers Amazon S3 and every S3-compatible store — Cloudflare R2,
+    Backblaze B2, Replit Object Storage — since they share the S3 API.
+    Pass it to ObjectStoreSink:
+
+        from traceact import ObjectStoreSink, S3Backend, AsyncSink, configure
+
+        backend = S3Backend(
+            endpoint="https://<accountid>.r2.cloudflarestorage.com",
+            bucket="my-traces",
+            access_key="<access-key>",
+            secret_key="<secret-key>",
+            region="auto",   # R2 uses "auto"; AWS uses the bucket's region
+        )
+        configure(sinks=[AsyncSink([ObjectStoreSink(backend)])])
+
+    Objects are addressed path-style, ``{endpoint}/{bucket}/{key}``, which every
+    S3-compatible store accepts.
+
+    Every request goes through the same outbound guard as HttpSink, OtlpSink,
+    and the viewer's focus hook
+    (see traceact._netguard): redirects are never followed, and the destination
+    is checked against network_policy/allow_private_network/allow_insecure_http.
+
+    Args:
+        endpoint:
+            Base URL of the S3 service, without a bucket or key, e.g.
+            ``https://s3.us-east-1.amazonaws.com`` or an R2/B2 endpoint.
+
+        bucket:
+            Target bucket name.
+
+        access_key, secret_key:
+            The store's access key id and secret. Read them from the
+            environment or a secret store; never commit them.
+
+        region:
+            The signing region. AWS uses the bucket's region (e.g.
+            ``us-east-1``); R2 uses ``auto``. Default: ``us-east-1``.
+
+        timeout:
+            Per-request timeout in seconds. Default: 10.0.
+
+        network_policy:
+            "warn" (default): an unsafe endpoint still delivers but emits a
+            NetworkGuardWarning once, at construction. "enforce": the check
+            runs before every put(); a failing endpoint raises and the sink
+            counts the batch as failed. "off": no check.
+
+        allow_private_network:
+            Permit an endpoint resolving to a private/link-local/reserved
+            address. Loopback is always permitted. Default: False.
+
+        allow_insecure_http:
+            Permit plain http:// beyond the default loopback-only case. None
+            (default) allows http:// only to loopback; True allows it anywhere
+            allow_private_network permits; False refuses http:// outright.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        bucket: str,
+        access_key: str,
+        secret_key: str,
+        region: str = "us-east-1",
+        timeout: float = 10.0,
+        network_policy: str = "warn",
+        allow_private_network: bool = False,
+        allow_insecure_http: Optional[bool] = None,
+    ) -> None:
+        if network_policy not in ("off", "warn", "enforce"):
+            raise ValueError(
+                f"network_policy must be 'off', 'warn', or 'enforce', got {network_policy!r}"
+            )
+        self.endpoint = endpoint.rstrip("/")
+        self.bucket = bucket
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.region = region
+        self.timeout = timeout
+        self.network_policy = network_policy
+        self.allow_private_network = allow_private_network
+        self.allow_insecure_http = allow_insecure_http
+        # The AWS service name in the SigV4 credential scope. Fixed for S3 and
+        # every S3-compatible store; carried as an attribute so the signing
+        # core can be checked against the published SigV4 test vectors.
+        self.service = "s3"
+
+        if network_policy == "warn":
+            # Checked once, at construction — the host is fixed for this
+            # backend's lifetime, so re-warning per put() would only repeat.
+            _warn_if_unsafe(self.endpoint, self.allow_private_network, self.allow_insecure_http)
+
+    def put(self, key: str, body: bytes, content_type: str) -> None:
+        """
+        PUT one object to ``{endpoint}/{bucket}/{key}``. Raises on any delivery
+        failure (network error, refused destination, non-2xx response) so the
+        calling sink can count it.
+        """
+        url = f"{self.endpoint}/{_urlquote(self.bucket)}/{_urlquote(key)}"
+        if self.network_policy == "enforce":
+            _netguard.check_destination(
+                url,
+                allow_private_network=self.allow_private_network,
+                allow_insecure_http=self.allow_insecure_http,
+            )
+        headers = self._sign("PUT", url, body, content_type)
+        req = _urllib_request.Request(url, data=body, method="PUT")
+        for name, value in headers.items():
+            req.add_header(name, value)
+        with _netguard.open_guarded(req, timeout=self.timeout) as resp:
+            status = resp.status
+        if status < 200 or status >= 300:
+            raise OSError(f"object store returned HTTP {status} for {key!r}")
+
+    # -- SigV4 signing -----------------------------------------------------
+
+    def _sign(self, method: str, url: str, body: bytes, content_type: str) -> Dict[str, str]:
+        """Build the SigV4 headers for one request. Stdlib hmac/hashlib only."""
+        parts = _urlsplit(url)
+        host = parts.netloc
+        canonical_uri = _urlquote(parts.path, safe="/~")
+        now = datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = now.strftime("%Y%m%d")
+        payload_hash = hashlib.sha256(body).hexdigest()
+
+        # content-type is sent but not signed: S3 validates only the headers
+        # named in SignedHeaders, so keeping the signed set to the three
+        # required headers is both correct and simpler.
+        canonical_headers = (
+            f"host:{host}\n"
+            f"x-amz-content-sha256:{payload_hash}\n"
+            f"x-amz-date:{amz_date}\n"
+        )
+        signed_headers = "host;x-amz-content-sha256;x-amz-date"
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            "",
+            canonical_headers,
+            signed_headers,
+            payload_hash,
+        ])
+        scope = f"{date_stamp}/{self.region}/{self.service}/aws4_request"
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ])
+        signature = hmac.new(
+            self._signing_key(date_stamp),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        authorization = (
+            f"AWS4-HMAC-SHA256 Credential={self.access_key}/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        return {
+            "Authorization": authorization,
+            "x-amz-date": amz_date,
+            "x-amz-content-sha256": payload_hash,
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+        }
+
+    def _signing_key(self, date_stamp: str) -> bytes:
+        """Derive the SigV4 signing key: HMAC chain over date/region/service."""
+        def _hmac(key: bytes, msg: str) -> bytes:
+            return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+        k_date = _hmac(("AWS4" + self.secret_key).encode("utf-8"), date_stamp)
+        k_region = _hmac(k_date, self.region)
+        k_service = _hmac(k_region, self.service)
+        return _hmac(k_service, "aws4_request")
 
 
 # ---------------------------------------------------------------------------
@@ -1408,12 +1794,13 @@ class AsyncSink:
     def flush(self) -> None:
         """
         Block until every record queued so far has been handed to the inner
-        sinks. Useful in tests and before a known shutdown point.
+        sinks, then flush any inner sink that buffers across writes.
 
         This does not stop the worker; more records can be written afterward.
         """
         if self._started:
             self._queue.join()
+        self._flush_inner_sinks()
 
     def close(self) -> None:
         """
@@ -1432,9 +1819,26 @@ class AsyncSink:
         self._queue.put(_SHUTDOWN)
         if self._worker is not None:
             self._worker.join()
+        # The worker has handed every queued record to the inner sinks. A sink
+        # that buffers across writes (ObjectStoreSink) still holds a sub-threshold
+        # batch at this point, so flush the inner sinks before returning —
+        # otherwise a short-lived script's last partial batch is lost on exit.
+        self._flush_inner_sinks()
         self._started = False
 
     # -- internals ---------------------------------------------------------
+
+    def _flush_inner_sinks(self) -> None:
+        """Flush any inner sink that exposes flush(). Most sinks write per
+        record and have none; ObjectStoreSink buffers and does. Failures are
+        swallowed like every other sink write — a flush must not crash close()."""
+        for sink in self.sinks:
+            flush = getattr(sink, "flush", None)
+            if callable(flush):
+                try:
+                    flush()
+                except Exception:
+                    pass
 
     def _ensure_started(self) -> None:
         """Start the worker thread once, on first write. Thread-safe."""

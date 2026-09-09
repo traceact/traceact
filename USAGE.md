@@ -15,9 +15,11 @@ traceact/
   redaction.py    — SENSITIVE_PATTERNS baseline + REDACTION_PRESETS registry
   sinks.py        — JsonlSink (thread-safe, rotation via max_bytes), ConsoleSink,
                     AsyncSink (background-thread wrapper; public as of v0.4),
-                    SqliteSink, HttpSink, OtlpSink
-  _netguard.py    — outbound network guard shared by HttpSink, OtlpSink, and
-                    the viewer's focus-hook forward; NetworkGuardError,
+                    SqliteSink, HttpSink, OtlpSink, ObjectStoreSink (with
+                    S3Backend for any S3-API store)
+  _netguard.py    — outbound network guard shared by HttpSink, OtlpSink,
+                    ObjectStoreSink's backend, and the viewer's focus-hook
+                    forward; NetworkGuardError,
                     NetworkGuardWarning
   log.py          — TraceLog: programmatic filter/query over trace sources
   helpers.py      — TraceHelpersMixin (trace.db, trace.http, trace.file, trace.model)
@@ -962,7 +964,7 @@ Three policies for when the queue is full:
 AsyncSink([JsonlSink("traces.jsonl")], max_queue=50_000, on_full="drop_oldest")
 ```
 
-**Graceful shutdown:** `AsyncSink` registers an `atexit` hook on first write. When the process exits normally, the worker flushes all buffered records before stopping — short-lived scripts don't need to call `close()` explicitly, but you can call it yourself at a known shutdown point to flush sooner.
+**Graceful shutdown:** `AsyncSink` registers an `atexit` hook on first write. When the process exits normally, the worker hands every queued record to the inner sinks and then flushes any inner sink that buffers across writes (`ObjectStoreSink`), so a sub-threshold batch isn't held past shutdown — short-lived scripts don't need to call `close()` explicitly, but you can call it yourself at a known shutdown point to flush sooner. `flush()` cascades the same way without stopping the worker.
 
 **Fork safety:** `os.fork()` doesn't copy background threads into child processes. `AsyncSink` registers a post-fork handler to reset the worker in the child so it starts fresh on the next write.
 
@@ -1164,6 +1166,59 @@ if sink.failed > 0:
 ```
 
 **Outbound network guard:** same guard as `HttpSink` — see [Outbound network guard](#httpsink) above. `network_policy`, `allow_private_network`, and `allow_insecure_http` take the same values and defaults; every `OtlpSink("http://localhost:4318")` example on this page keeps working unchanged, since loopback `http://` is permitted by default.
+
+### ObjectStoreSink
+
+Writes traces to blob storage — Amazon S3, Cloudflare R2, Backblaze B2, Replit Object Storage, or any S3-API service. Object stores take whole objects at a key rather than appended lines, so `ObjectStoreSink` batches finished traces into newline-delimited JSON and writes each batch as one object. It's transport-agnostic: it calls a backend's `put(key, body, content_type)`, and `S3Backend` is the backend provided.
+
+```python
+from traceact import ObjectStoreSink, S3Backend, AsyncSink, configure
+
+backend = S3Backend(
+    endpoint="https://s3.us-east-1.amazonaws.com",
+    bucket="my-traces",
+    access_key="<access-key>",
+    secret_key="<secret-key>",
+    region="us-east-1",
+)
+configure(sinks=[AsyncSink([ObjectStoreSink(backend, prefix="prod/")])])
+```
+
+One `S3Backend` covers every S3-compatible store, since they share the S3 API. For Cloudflare R2, point `endpoint` at the R2 URL and set `region="auto"`:
+
+```python
+S3Backend(
+    endpoint="https://<accountid>.r2.cloudflarestorage.com",
+    bucket="my-traces",
+    access_key="<access-key>",
+    secret_key="<secret-key>",
+    region="auto",
+)
+```
+
+Requests are signed with AWS Signature Version 4 using only the standard library — no vendor SDK, and `import traceact` stays dependency-free. Read the access key and secret from the environment or a secret store; never commit them.
+
+**Batching.** `write()` buffers a record; the buffer is delivered as one object when it reaches `flush_records` (default 500) or when `flush_seconds` (default 5.0) has elapsed since the last delivery, checked on the next write, and always on `flush()` and `close()`. Each object is keyed `prefix/YYYY/MM/DD/<epoch_ms>-<uuid>.jsonl`, so keys sort in write order and a reader concatenates them by key.
+
+**Compression is off by default.** Objects are plain `.jsonl` a reader uses without a decompress step. Pass `compress=True` to gzip each object (`.jsonl.gz`, `application/gzip`) when storage bytes are the priority:
+
+```python
+ObjectStoreSink(backend, prefix="prod/", compress=True)
+```
+
+**Always wrap in `AsyncSink` for production.** Each delivered batch makes a synchronous request; without `AsyncSink` that latency hits the traced call that happened to fill the buffer.
+
+**Observable failures:** a batch whose delivery fails counts its records in `ObjectStoreSink.failed` — never raised. A failed batch is not retried, so the count reflects records that did not reach the store:
+
+```python
+sink = ObjectStoreSink(backend)
+configure(sinks=[AsyncSink([sink])])
+
+if sink.failed > 0:
+    logger.warning("ObjectStoreSink: %d records failed to store", sink.failed)
+```
+
+**Outbound network guard:** `S3Backend` takes the same `network_policy`, `allow_private_network`, and `allow_insecure_http` arguments as `HttpSink` — see [Outbound network guard](#httpsink) above — checked against the store endpoint.
 
 ### Fallback
 
@@ -1634,7 +1689,7 @@ $ traceact doctor data/traces/traces.jsonl
 traceact doctor
 
   ✓  Python 3.10 (meets the 3.10+ requirement)
-  ·  traceact 1.4.0
+  ·  traceact 1.5.0
   ·  rates not installed — cost estimates are off (pip install rates to turn them on)
   ✓  State directory (/Users/you/.traceact) is writable
   ·  No viewer currently running (not required).
@@ -2262,6 +2317,8 @@ from traceact import (
     SqliteSink,     # write traces to a local SQLite database
     HttpSink,       # POST traces to an HTTP(S) collector
     OtlpSink,       # export traces to an OTLP-compatible collector
+    ObjectStoreSink,# batch traces into objects for a blob store
+    S3Backend,      # ObjectStoreSink backend for any S3-API store
     TraceLog,       # programmatic filter/query over trace sources
     REDACTION_PRESETS,       # the available redaction preset names
     NetworkGuardError,       # the outbound network guard's exception type

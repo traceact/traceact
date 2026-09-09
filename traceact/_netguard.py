@@ -1,9 +1,10 @@
 # traceact/_netguard.py
 #
 # Shared outbound-network safety guard. Used by every place TraceAct makes
-# an outbound HTTP(S) call on the caller's behalf: HttpSink, OtlpSink, and
-# the viewer's focus hook. One policy, one implementation, so a change here
-# fixes all three instead of drifting apart between three copies.
+# an outbound HTTP(S) call on the caller's behalf: HttpSink, OtlpSink,
+# ObjectStoreSink's backend, and the viewer's focus hook. One policy, one
+# implementation, so a change here fixes every caller instead of drifting
+# apart between copies.
 #
 # Threat model: TraceAct runs inside applications and agents that may pass
 # attacker-influenced or misconfigured values into a URL a sink or hook then
@@ -153,7 +154,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     HTTPDefaultErrorHandler, which raises HTTPError with the original
     status code (confirmed via tests/test_netguard.py, not assumed). Every
     call site here already catches that broadly (HttpSink/OtlpSink's
-    `except Exception`, the focus hook's `except HTTPError as exc: status
+    `except Exception`, ObjectStoreSink._deliver's `except Exception` around
+    the S3Backend put, the focus hook's `except HTTPError as exc: status
     = exc.code`), so a refused redirect surfaces the same way any other
     delivery failure does.
     """
